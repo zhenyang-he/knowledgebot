@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -44,6 +45,10 @@ type Event struct {
 	GroupID          string          `json:"group_id"`
 	Message          Message         `json:"message"`
 	InteractiveData  InteractiveData `json:"interactive_data"`
+	MessageID        string          `json:"message_id"`
+	Value            string          `json:"value"`
+	SeatalkID        string          `json:"seatalk_id"`
+	ThreadID         string          `json:"thread_id"`
 }
 
 type InteractiveData struct {
@@ -130,8 +135,10 @@ type SendMessageToUserResp struct {
 // Global variables
 var (
 	appAccessToken AppAccessToken
-	groupID        = "OTIzMTMwNjE4MTI4" // small group: OTIzMTMwNjE4MTI4
-	alertSentTime  time.Time            // Track when alert was sent
+	groupID        = "OTIzMTMwNjE4MTI4"                   // small group: OTIzMTMwNjE4MTI4
+	alertSentTime  time.Time                              // Track when alert was sent
+	alertResponses = make(map[string]map[string][]string) // messageID -> employeeCode -> [button_types_pressed]
+	responseMutex  sync.RWMutex
 )
 
 func main() {
@@ -373,7 +380,7 @@ func SendMessageToGroup(ctx context.Context, message, groupID string) error {
 	return nil
 }
 
-func SendKnowledgeBaseAlert(ctx context.Context, groupID string) error {
+func SendKnowledgeBaseReminder(ctx context.Context, groupID string) error {
 	messageID := fmt.Sprintf("%d", time.Now().Unix())
 	alertTime := time.Now().Format("2006-01-02 15:04:05")
 
@@ -386,7 +393,7 @@ func SendKnowledgeBaseAlert(ctx context.Context, groupID string) error {
 					{
 						ElementType: "title",
 						Title: &SOPInteractiveTitle{
-							Text: "📚 [Reminder] Knowledge Base Update",
+							Text: "📚 [Reminder] Knowledge Base and Data Preparation Update",
 						},
 					},
 					{
@@ -395,14 +402,17 @@ func SendKnowledgeBaseAlert(ctx context.Context, groupID string) error {
 							Format: 1,
 							Text: fmt.Sprintf(`📖 **Time to update our knowledge base!**
 
+📅 **Reminder Time:** %s
+Jira ticket: <link>
+Signed off by: <name>
+
 Our documentation needs some love to stay current and helpful for the team. Please take a moment to:
-• Review and update outdated information
+• Review and update outdated information and data preparation steps
 • Add new processes or solutions you've discovered
 • Ensure all team knowledge is properly documented and up to date
 
-📅 **Alert Time:** %s
-
-Click **Complete** below once you've finished updating the knowledge base. Thank you for keeping our documentation fresh! 🙏`, alertTime),
+Click **Complete** once you've finished updating or **Nothing to update** if there's nothing to update.
+Thank you for keeping our documentation fresh! 🙏`, alertTime),
 						},
 					},
 					{
@@ -413,6 +423,16 @@ Click **Complete** below once you've finished updating the knowledge base. Thank
 							Value:        "kb_complete_" + messageID,
 							CallbackData: "kb_complete_" + messageID,
 							ActionID:     "kb_complete_" + messageID,
+						},
+					},
+					{
+						ElementType: "button",
+						Button: &SOPInteractiveButton{
+							ButtonType:   "callback",
+							Text:         "Nothing to update ⚪",
+							Value:        "kb_cancel_" + messageID,
+							CallbackData: "kb_cancel_" + messageID,
+							ActionID:     "kb_cancel_" + messageID,
 						},
 					},
 				},
@@ -469,18 +489,18 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 			log.Printf("ERROR: Failed to send debug message: %v", err)
 		}
 	} else if strings.Contains(strings.ToLower(message), "alert") {
-		log.Printf("INFO: Alert trigger detected from: %s", displayName)
+		log.Printf("INFO: Reminder trigger detected from: %s", displayName)
 
 		// Record the time when alert is sent
 		alertSentTime = time.Now()
-		if err := SendKnowledgeBaseAlert(ctx, groupID); err != nil {
-			log.Printf("ERROR: Failed to send alert: %v", err)
-			if err := SendMessageToUser(ctx, "❌ Failed to send alert to group", reqSOP.Event.EmployeeCode); err != nil {
+		if err := SendKnowledgeBaseReminder(ctx, groupID); err != nil {
+			log.Printf("ERROR: Failed to send reminder: %v", err)
+			if err := SendMessageToUser(ctx, "❌ Failed to send reminder to group", reqSOP.Event.EmployeeCode); err != nil {
 				log.Printf("ERROR: Failed to send error message: %v", err)
 			}
 		} else {
 			// Send confirmation to the person who triggered it
-			confirmMsg := "✅ Alert sent successfully to the group!"
+			confirmMsg := "✅ Reminder sent successfully to the group!"
 			if err := SendMessageToUser(ctx, confirmMsg, reqSOP.Event.EmployeeCode); err != nil {
 				log.Printf("ERROR: Failed to send confirmation: %v", err)
 			}
@@ -491,13 +511,13 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 **Private Messages:**
 • "help" - Show this help message
 • "debug" - Show debug information
-• "alert" - Send knowledge base alert to group
+• "alert" - Send knowledge base reminder to group
 
 **Group Messages:**
 • "@KnowledgeBot debug" - Show group ID and debug info
 
 **Interactive Features:**
-• Alert system with built-in Complete button
+• Reminder system with built-in Complete button
 • Click Complete button to confirm knowledge base updated`
 
 		if err := SendMessageToUser(ctx, helpMsg, reqSOP.Event.EmployeeCode); err != nil {
@@ -528,7 +548,7 @@ func handleGroupMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 🏢 **This Group ID:** ` + reqSOP.Event.GroupID + `
 👤 **Your Employee Code:** ` + reqSOP.Event.EmployeeCode + `
 
-💡 **To use this group for alerts, set alertGroupID = "` + reqSOP.Event.GroupID + `"`
+💡 **To use this group for reminder, set alertGroupID = "` + reqSOP.Event.GroupID + `"`
 
 		if err := SendMessageToGroup(ctx, debugMsg, reqSOP.Event.GroupID); err != nil {
 			log.Printf("ERROR: Failed to send debug message to group: %v", err)
@@ -541,7 +561,7 @@ func handleGroupMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 • "@KnowledgeBot help" - Show this help message
 
 **Private Commands:**
-• Send me "alert" privately to trigger alerts with Complete button
+• Send me "alert" privately to trigger reminder with Complete button
 • Send me "help" privately for more commands
 
 **Interactive Features:**
@@ -555,18 +575,71 @@ func handleGroupMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 }
 
 func handleButtonClick(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
-	// Check if this is a complete button click
-	// If interactive data is empty, assume it's our complete button (since we only have one button)
-	if strings.Contains(reqSOP.Event.InteractiveData.CallbackData, "kb_complete") ||
-		strings.Contains(reqSOP.Event.InteractiveData.Value, "kb_complete") ||
-		strings.Contains(reqSOP.Event.InteractiveData.ActionID, "kb_complete") ||
-		(reqSOP.Event.InteractiveData.CallbackData == "" && reqSOP.Event.InteractiveData.Value == "" && reqSOP.Event.InteractiveData.ActionID == "") {
+	// Extract message ID and button type from the button value
+	var messageID, buttonType string
+	if strings.Contains(reqSOP.Event.Value, "kb_complete_") {
+		messageID = strings.TrimPrefix(reqSOP.Event.Value, "kb_complete_")
+		buttonType = "complete"
+	} else if strings.Contains(reqSOP.Event.Value, "kb_cancel_") {
+		messageID = strings.TrimPrefix(reqSOP.Event.Value, "kb_cancel_")
+		buttonType = "cancel"
+	} else {
+		log.Printf("WARNING: Unknown button value: '%s'", reqSOP.Event.Value)
+		return
+	}
 
-		handleKnowledgeBaseComplete(ctx, reqSOP.Event, reqSOP.Event.GroupID)
+	// Check user's previous responses to this alert
+	responseMutex.Lock()
+	if alertResponses[messageID] == nil {
+		alertResponses[messageID] = make(map[string][]string)
+	}
+
+	userResponses := alertResponses[messageID][reqSOP.Event.EmployeeCode]
+
+	// Check if user has already pressed both buttons
+	hasComplete := contains(userResponses, "complete")
+	hasCancel := contains(userResponses, "cancel")
+
+	if hasComplete && hasCancel {
+		responseMutex.Unlock()
+		log.Printf("INFO: User %s has already used both buttons for alert %s, blocking further clicks", reqSOP.Event.EmployeeCode, messageID)
+		return
+	}
+
+	// Check if user is clicking the same button again
+	if contains(userResponses, buttonType) {
+		responseMutex.Unlock()
+		log.Printf("INFO: User %s already clicked %s button for alert %s, ignoring duplicate", reqSOP.Event.EmployeeCode, buttonType, messageID)
+		return
+	}
+
+	// Add this button type to user's response history
+	alertResponses[messageID][reqSOP.Event.EmployeeCode] = append(userResponses, buttonType)
+	isSecondButton := len(userResponses) > 0 // This will be the second button press
+	responseMutex.Unlock()
+
+	// Process the button click
+	switch buttonType {
+	case "complete":
+		log.Printf("INFO: Complete button detected")
+		handleKnowledgeBaseComplete(ctx, reqSOP.Event, reqSOP.Event.GroupID, isSecondButton)
+	case "cancel":
+		log.Printf("INFO: Cancel button detected")
+		handleKnowledgeBaseCancel(ctx, reqSOP.Event, reqSOP.Event.GroupID, isSecondButton)
 	}
 }
 
-func handleKnowledgeBaseComplete(ctx *gin.Context, event Event, groupID string) {
+// Helper function to check if slice contains a string
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
+}
+
+func handleKnowledgeBaseComplete(ctx *gin.Context, event Event, groupID string, isSecondButton bool) {
 	displayName := getEmployeeDisplayName(event)
 	completedTime := time.Now()
 
@@ -579,11 +652,18 @@ func handleKnowledgeBaseComplete(ctx *gin.Context, event Event, groupID string) 
 		cheerMessage = fmt.Sprintf("\n%s", getCheerMessage(duration))
 	}
 
-	// Send confirmation message with timestamps
-	confirmMsg := fmt.Sprintf(`✅ **Knowledge base is updated by %s**
+	// Add [Updated] prefix if this is the second button press
+	titlePrefix := ""
+	if isSecondButton {
+		titlePrefix = "[Updated] "
+	}
 
-📅 **Alert Sent:** %s
+	// Send confirmation message with timestamps
+	confirmMsg := fmt.Sprintf(`✅ **%sKnowledge base is updated by %s**
+
+📅 **Reminder Sent:** %s
 📅 **Completed:** %s%s%s`,
+		titlePrefix,
 		displayName,
 		alertSentTime.Format("2006-01-02 15:04:05"),
 		completedTime.Format("2006-01-02 15:04:05"),
@@ -593,6 +673,40 @@ func handleKnowledgeBaseComplete(ctx *gin.Context, event Event, groupID string) 
 
 	if err := SendMessageToGroup(ctx, confirmMsg, groupID); err != nil {
 		log.Printf("ERROR: Failed to send completion confirmation: %v", err)
+	}
+}
+
+func handleKnowledgeBaseCancel(ctx *gin.Context, event Event, groupID string, isSecondButton bool) {
+	displayName := getEmployeeDisplayName(event)
+	cancelledTime := time.Now()
+
+	// Calculate duration if alert was sent
+	var durationMsg string
+	if !alertSentTime.IsZero() {
+		duration := cancelledTime.Sub(alertSentTime)
+		durationMsg = fmt.Sprintf("\n⏱️ **Response Time:** %s", formatDuration(duration))
+	}
+
+	// Add [Updated] prefix if this is the second button press
+	titlePrefix := ""
+	if isSecondButton {
+		titlePrefix = "[Updated] "
+	}
+
+	// Send cancellation message
+	cancelMsg := fmt.Sprintf(`🚫 **%s%s acknowledged that knowledge base does not require update for this Jira ticket**
+
+📅 **Reminder Sent:** %s
+📅 **Acknowledged:** %s%s`,
+		titlePrefix,
+		displayName,
+		alertSentTime.Format("2006-01-02 15:04:05"),
+		cancelledTime.Format("2006-01-02 15:04:05"),
+		durationMsg,
+	)
+
+	if err := SendMessageToGroup(ctx, cancelMsg, groupID); err != nil {
+		log.Printf("ERROR: Failed to send cancellation confirmation: %v", err)
 	}
 }
 
