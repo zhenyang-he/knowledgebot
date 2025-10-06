@@ -538,7 +538,7 @@ func SendInteractiveMessageToGroup(ctx context.Context, groupID, title, descript
 // Jira QA Reminder Functions
 func makeJiraRequest(method, endpoint string, body []byte) (*http.Response, error) {
 	if jiraConfig.BaseURL == "" || jiraConfig.Username == "" || jiraConfig.APIToken == "" {
-		return nil, fmt.Errorf("Jira configuration is incomplete. Please set JIRA_BASE_URL, JIRA_USERNAME, and JIRA_API_TOKEN environment variables")
+		return nil, fmt.Errorf("Jira configuration is incomplete, please check your environment variables")
 	}
 
 	url := jiraConfig.BaseURL + endpoint
@@ -654,12 +654,14 @@ func processQAReminders() (int, error) {
 	// Get group members
 	members := getGroupMembers()
 	totalSent := 0
+	errorCount := 0
 
 	for _, member := range members {
 		// Search for Jira tickets assigned to this QA
 		tickets, err := searchJiraQATickets(member.Email)
 		if err != nil {
 			log.Printf("ERROR: Failed to search Jira tickets for %s: %v", member.DisplayName, err)
+			errorCount++
 			continue
 		}
 
@@ -695,6 +697,11 @@ func processQAReminders() (int, error) {
 			log.Printf("INFO: Sent %d new reminders to %s", sentCount, member.DisplayName)
 		}
 		totalSent += sentCount
+	}
+
+	// If all members had errors, return an error
+	if errorCount > 0 && errorCount == len(members) {
+		return totalSent, fmt.Errorf("failed to query Jira for all team members")
 	}
 
 	return totalSent, nil
@@ -1118,7 +1125,7 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 		sentCount, err := processQAReminders()
 		if err != nil {
 			log.Printf("ERROR: Manual QA reminder processing failed: %v", err)
-			errorMsg := fmt.Sprintf("❌ Failed to process QA reminders: %v", err)
+			errorMsg := "❌ Failed to query Jira. Please check:\n• Jira service is accessible\n• Jira API credentials are set correctly\n📖 Please refer to the ENV_SETUP file for configuration instructions"
 			if err := SendMessageToUser(ctx, errorMsg, reqSOP.Event.EmployeeCode); err != nil {
 				log.Printf("ERROR: Failed to send error message: %v", err)
 			}
