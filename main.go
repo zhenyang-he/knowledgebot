@@ -150,6 +150,13 @@ type SOPSendMessageToGroup struct {
 	Message SOPMessage `json:"message"`
 }
 
+type SOPSendThreadMessage struct {
+	GroupID         string     `json:"group_id"`
+	Message         SOPMessage `json:"message"`
+	QuotedMessageID string     `json:"quoted_message_id"`
+	ThreadID        string     `json:"thread_id"`
+}
+
 type SOPMessage struct {
 	Tag                string                 `json:"tag"`
 	Text               *SOPTextMsg            `json:"text,omitempty"`
@@ -190,7 +197,8 @@ type SOPTextMsg struct {
 }
 
 type SendMessageToUserResp struct {
-	Code int `json:"code"`
+	Code      int    `json:"code"`
+	MessageID string `json:"message_id"`
 }
 
 // Global variables
@@ -318,7 +326,12 @@ func WithSOPSignatureValidation() gin.HandlerFunc {
 		}
 
 		hasher := sha256.New()
-		signingSecret := "g_RKjOATWhUt5FFWP1lztCjvFlW5tngl" // Replace this with your Bot Signing Secret
+		signingSecret := getEnvOrDefault("SEATALK_SIGNING_SECRET", "")
+		if signingSecret == "" {
+			log.Printf("ERROR: SeaTalk signing secret not configured. Please set SEATALK_SIGNING_SECRET environment variable")
+			ctx.JSON(http.StatusForbidden, nil)
+			return
+		}
 		hasher.Write(append(body, []byte(signingSecret)...))
 		targetSignature := hex.EncodeToString(hasher.Sum(nil))
 
@@ -339,7 +352,13 @@ func GetAppAccessToken() AppAccessToken {
 	accTokenIsExpired := appAccessToken.ExpireTime < uint64(timeNow)
 
 	if accTokenIsEmpty || accTokenIsExpired {
-		body := []byte(fmt.Sprintf(`{"app_id": "%s", "app_secret": "%s"}`, "MTcyNzE5ODkyMzg1", "HSFa831gq2ojDXZLVoVkHLBSkymoW-Tz"))
+		appID := getEnvOrDefault("SEATALK_APP_ID", "")
+		appSecret := getEnvOrDefault("SEATALK_APP_SECRET", "")
+		if appID == "" || appSecret == "" {
+			log.Printf("ERROR: SeaTalk credentials not configured. Please set SEATALK_APP_ID and SEATALK_APP_SECRET environment variables")
+			return appAccessToken
+		}
+		body := []byte(fmt.Sprintf(`{"app_id": "%s", "app_secret": "%s"}`, appID, appSecret))
 
 		req, err := http.NewRequest("POST", "https://openapi.seatalk.io/auth/app_access_token", bytes.NewBuffer(body))
 		if err != nil {
@@ -357,13 +376,14 @@ func GetAppAccessToken() AppAccessToken {
 		}
 		defer res.Body.Close()
 
+		responseBody, _ := io.ReadAll(res.Body)
 		if res.StatusCode != 200 {
-			log.Printf("ERROR: [GetAppAccessToken] got non 200 HTTP response status code: %v", err)
+			log.Printf("ERROR: [GetAppAccessToken] got non 200 HTTP response status code: %d, body: %s", res.StatusCode, string(responseBody))
 			return appAccessToken
 		}
 
 		resp := &SOPAuthAppResp{}
-		if err := json.NewDecoder(res.Body).Decode(resp); err != nil {
+		if err := json.NewDecoder(bytes.NewReader(responseBody)).Decode(resp); err != nil {
 			log.Printf("ERROR: [GetAppAccessToken] failed to parse response body: %v", err)
 			return appAccessToken
 		}
@@ -402,7 +422,8 @@ func SendMessageToUser(ctx context.Context, message, employeeCode string) error 
 	req.Header.Add("Content-Type", "application/json")
 
 	// Every SOP API need an authorization, to make sure that our Bot is authorized to call that API. We will use the token that we retrieved on the Step 2.
-	req.Header.Add("Authorization", "Bearer "+GetAppAccessToken().AccessToken)
+	accessToken := GetAppAccessToken()
+	req.Header.Add("Authorization", "Bearer "+accessToken.AccessToken)
 
 	client := &http.Client{}
 	res, err := client.Do(req)
@@ -462,8 +483,46 @@ func SendMessageToGroup(ctx context.Context, message, groupID string) error {
 	return nil
 }
 
+func SendMessageToThread(ctx context.Context, message, groupID, threadID string) error {
+	bodyJson, _ := json.Marshal(SOPSendThreadMessage{
+		GroupID: groupID,
+		Message: SOPMessage{
+			Tag: "text",
+			Text: &SOPTextMsg{
+				Format:  1, // Rich text format (use 2 for plain text)
+				Content: message,
+			},
+		},
+		QuotedMessageID: threadID, // Empty as per documentation
+		ThreadID:        threadID,
+	})
+
+	req, _ := http.NewRequest("POST", "https://openapi.seatalk.io/messaging/v2/group_chat", bytes.NewBuffer(bodyJson))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+GetAppAccessToken().AccessToken)
+
+	// Debug the thread message request
+	log.Printf("DEBUG: SendMessageToThread - Request body: %s", string(bodyJson))
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send thread message: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	log.Printf("DEBUG: SendMessageToThread - Response body: %s", string(body))
+
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("failed to send thread message, response code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
 // Helper function to send interactive messages to group
-func SendInteractiveMessageToGroup(ctx context.Context, groupID, title, description, buttonID string) error {
+func SendInteractiveMessageToGroup(ctx context.Context, groupID, title, description, buttonID string) (string, error) {
 	bodyJson, _ := json.Marshal(SOPSendMessageToGroup{
 		GroupID: groupID,
 		Message: SOPMessage{
@@ -510,7 +569,7 @@ func SendInteractiveMessageToGroup(ctx context.Context, groupID, title, descript
 
 	req, err := http.NewRequest("POST", "https://openapi.seatalk.io/messaging/v2/group_chat", bytes.NewBuffer(bodyJson))
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	req.Header.Add("Content-Type", "application/json")
@@ -519,20 +578,20 @@ func SendInteractiveMessageToGroup(ctx context.Context, groupID, title, descript
 	client := &http.Client{}
 	res, err := client.Do(req)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer res.Body.Close()
 
 	resp := &SendMessageToUserResp{}
 	if err := json.NewDecoder(res.Body).Decode(resp); err != nil {
-		return err
+		return "", err
 	}
 
 	if resp.Code != 0 {
-		return fmt.Errorf("failed to send interactive message, response code: %v", resp.Code)
+		return "", fmt.Errorf("failed to send interactive message, response code: %v", resp.Code)
 	}
 
-	return nil
+	return resp.MessageID, nil
 }
 
 // Jira QA Reminder Functions
@@ -686,7 +745,7 @@ func processQAReminders() (int, error) {
 			}
 
 			// Send reminder for new tickets
-			if err := sendQAReminder(ticket, member); err != nil {
+			if err := sendQAReminder(ticket, member, false); err != nil {
 				log.Printf("ERROR: Failed to send QA reminder for %s to %s: %v", ticket.Key, member.DisplayName, err)
 			} else {
 				sentCount++
@@ -738,7 +797,7 @@ func processFollowUpReminders() error {
 			}
 
 			// Send follow-up reminder
-			if err := sendQAReminder(ticket, member); err != nil {
+			if err := sendQAReminder(ticket, member, false); err != nil {
 				log.Printf("ERROR: Failed to send follow-up reminder for %s: %v", reminder.IssueKey, err)
 			}
 		}
@@ -840,9 +899,7 @@ func wasMovedToSecondReviewRecently(issue *JiraIssue) bool {
 	return reviewYear == prevYear && reviewMonth == prevMonth && reviewDay == prevDay
 }
 
-func sendQAReminder(ticket JiraIssue, qa GroupMember) error {
-	messageID := fmt.Sprintf("qa_reminder_%s_%d", ticket.Key, time.Now().Unix())
-
+func sendQAReminder(ticket JiraIssue, qa GroupMember, isMock bool) error {
 	// Create Jira ticket URL
 	jiraURL := fmt.Sprintf("%s/browse/%s", jiraConfig.BaseURL, ticket.Key)
 
@@ -855,33 +912,47 @@ func sendQAReminder(ticket JiraIssue, qa GroupMember) error {
 	isFollowUp := existingReminder != nil
 	reminderMutex.RUnlock()
 
-	// Create reminder message with [Follow-up Required] prefix if it's a follow-up
+	// Create reminder message with appropriate prefix
 	title := "📚 Knowledge Base Reminder"
-	if isFollowUp {
+	if isMock {
+		title = "📚 [MOCK] Knowledge Base Reminder"
+	} else if isFollowUp {
 		title = "📚 [Follow-up Required] Knowledge Base Reminder"
 	}
 
+	var qaField string
+	if isMock {
+		qaField = "**QA:** MockQA"
+	} else {
+		qaField = fmt.Sprintf("**QA:** <mention-tag target=\"seatalk://user?email=%s\"/> (cc: <mention-tag target=\"seatalk://user?email=shuang.xiao@shopee.com\"/>)", qa.Email)
+	}
+
 	description := fmt.Sprintf(`
-**QA:** %s
+%s
 **Jira Ticket:** %s
 **Date moved to 2nd Review:** %s
-
-⏰ **Please review and update the knowledge base accordingly.**
 
 📝 **Tasks to consider:**
 • Review and update outdated information and data preparation steps
 • Add new processes or solutions you've discovered
 • Ensure all team knowledge is properly documented and up to date
 
+📊 **Please review and update the knowledge base accordingly:**
+https://docs.google.com/spreadsheets/d/1QlBZniYwL5VqKW1KQxjTs4LEGqOJ8YWRFTLhX-MZBtU/edit?gid=0#gid=0
+
 Click the appropriate button below when done:`,
-		qa.DisplayName,
+		qaField,
 		jiraURL,
 		reviewDate)
 
 	// Use the common helper function with consistent button ID per ticket (no timestamp)
 	// This ensures buttons from group and status messages are linked
 	buttonID := ticket.Key
-	if err := SendInteractiveMessageToGroup(context.Background(), groupID, title, description, buttonID); err != nil {
+	if isMock {
+		buttonID = "MOCK_" + ticket.Key
+	}
+	messageID, err := SendInteractiveMessageToGroup(context.Background(), groupID, title, description, buttonID)
+	if err != nil {
 		log.Printf("ERROR: Failed to send QA reminder: %v", err)
 		return err
 	}
@@ -890,12 +961,12 @@ Click the appropriate button below when done:`,
 	now := time.Now()
 	reminderMutex.Lock()
 
-	if isFollowUp {
+	if isFollowUp && !isMock {
 		// Update only the LastSentTime for follow-ups, keep original SentTime
 		existingReminder.LastSentTime = now
 		log.Printf("INFO: Follow-up QA reminder sent for %s to %s", ticket.Key, qa.DisplayName)
 	} else {
-		// Create new reminder entry
+		// Create new reminder entry (for new reminders or mock reminders)
 		qaReminders[ticket.Key] = &QAReminder{
 			IssueKey:     ticket.Key,
 			QAName:       qa.DisplayName,
@@ -905,7 +976,9 @@ Click the appropriate button below when done:`,
 			LastSentTime: now,
 			Completed:    false,
 		}
-		log.Printf("INFO: QA reminder sent and tracked for %s to %s", ticket.Key, qa.DisplayName)
+		if !isMock {
+			log.Printf("INFO: QA reminder sent and tracked for %s to %s", ticket.Key, qa.DisplayName)
+		}
 	}
 
 	reminderMutex.Unlock()
@@ -1132,13 +1205,30 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 		} else {
 			var confirmMsg string
 			if sentCount == 0 {
-				confirmMsg = "ℹ️ No new reminders to send. All eligible tickets already have reminders."
+				confirmMsg = "ℹ️ No new reminders to send. All eligible tickets already have reminders.\n\n💡 **Tip:** Send 'mock' to trigger a test reminder."
 				log.Printf("INFO: Manual QA reminder check completed - no new reminders sent")
 			} else {
 				confirmMsg = fmt.Sprintf("✅ Successfully sent %d new QA reminder(s)! Check the group for the reminders.", sentCount)
 				log.Printf("INFO: Manual QA reminder processing completed - %d reminders sent", sentCount)
 			}
 
+			if err := SendMessageToUser(ctx, confirmMsg, reqSOP.Event.EmployeeCode); err != nil {
+				log.Printf("ERROR: Failed to send confirmation: %v", err)
+			}
+		}
+
+	case strings.Contains(messageLower, "mock"):
+		log.Printf("INFO: Mock reminder trigger detected from: %s", displayName)
+
+		if err := sendQAReminder(JiraIssue{Key: "MOCK-12345"}, GroupMember{}, true); err != nil {
+			log.Printf("ERROR: Failed to send mock reminder: %v", err)
+			errorMsg := "❌ Failed to send mock reminder. Please check the bot logs."
+			if err := SendMessageToUser(ctx, errorMsg, reqSOP.Event.EmployeeCode); err != nil {
+				log.Printf("ERROR: Failed to send error message: %v", err)
+			}
+		} else {
+			confirmMsg := "✅ Mock reminder sent successfully! Check the group for the test reminder."
+			log.Printf("INFO: Mock reminder sent successfully")
 			if err := SendMessageToUser(ctx, confirmMsg, reqSOP.Event.EmployeeCode); err != nil {
 				log.Printf("ERROR: Failed to send confirmation: %v", err)
 			}
@@ -1153,6 +1243,7 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 • "list" - View all completed and pending reminders for the team
 • "status" - View all your pending QA reminders with action buttons
 • "jira" - Manually trigger QA Jira queries check
+• "mock" - Send a test reminder to verify bot functionality
 
 **Automated Features:**
 • Daily 10am Jira QA reminders for tickets moved to 2nd review past 2 days
@@ -1184,8 +1275,7 @@ func handleGroupMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 		message = reqSOP.Event.Message.Text.PlainText
 	}
 
-	displayName := getEmployeeDisplayName(reqSOP.Event)
-	log.Printf("INFO: group message received: %s, from: %s, in group: %s", message, displayName, reqSOP.Event.GroupID)
+	log.Printf("INFO: group message received: %s, in group: %s", message, reqSOP.Event.GroupID)
 
 	messageLower := strings.ToLower(message)
 
@@ -1193,23 +1283,61 @@ func handleGroupMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 	switch {
 	case strings.Contains(messageLower, "debug") || strings.Contains(messageLower, "groupid"):
 		debugMsg := `🔧 **Debug Info:**
-
-📍 **Current Context:** Group Chat
-🏢 **This Group ID:** ` + reqSOP.Event.GroupID + `
-👤 **Your Employee Code:** ` + reqSOP.Event.EmployeeCode + `
-
-💡 **To use this group for reminder, set alertGroupID = "` + reqSOP.Event.GroupID + `"`
+🏢 **This Group ID:** ` + reqSOP.Event.GroupID
 
 		if err := SendMessageToGroup(ctx, debugMsg, reqSOP.Event.GroupID); err != nil {
 			log.Printf("ERROR: Failed to send debug message to group: %v", err)
 		}
 
-	case strings.Contains(messageLower, "help"):
+	case strings.Contains(messageLower, "list"):
+		// Get all reminders
+		reminderMutex.RLock()
+		var completedReminders, pendingReminders []QAReminder
+		for _, reminder := range qaReminders {
+			if reminder.Completed {
+				completedReminders = append(completedReminders, *reminder)
+			} else {
+				pendingReminders = append(pendingReminders, *reminder)
+			}
+		}
+		reminderMutex.RUnlock()
+
+		// Build the list message
+		var listMsg strings.Builder
+		listMsg.WriteString("📋 **Knowledge Base Status List**\n\n")
+
+		// Completed section (shows all completed reminders until next Monday cleanup)
+		listMsg.WriteString("✅ **Completed reminders this week:**\n")
+		if len(completedReminders) == 0 {
+			listMsg.WriteString("• None\n")
+		} else {
+			for _, reminder := range completedReminders {
+				jiraURL := fmt.Sprintf("%s/browse/%s", jiraConfig.BaseURL, reminder.IssueKey)
+				completedTime := reminder.LastSentTime.Format("Mon 3:04 PM")
+				listMsg.WriteString(fmt.Sprintf("• %s - by %s (%s)\n", jiraURL, reminder.QAName, completedTime))
+			}
+		}
+
+		listMsg.WriteString("\n⏳ **All pending reminders:**\n")
+		if len(pendingReminders) == 0 {
+			listMsg.WriteString("• None\n")
+		} else {
+			for _, reminder := range pendingReminders {
+				jiraURL := fmt.Sprintf("%s/browse/%s", jiraConfig.BaseURL, reminder.IssueKey)
+				listMsg.WriteString(fmt.Sprintf("• %s - by %s\n", jiraURL, reminder.QAName))
+			}
+		}
+
+		if err := SendMessageToGroup(ctx, listMsg.String(), reqSOP.Event.GroupID); err != nil {
+			log.Printf("ERROR: Failed to send list message to group: %v", err)
+		}
+	default:
+		// Respond to unrecognized commands with available options
 		helpMsg := `🤖 **Knowledge Base Bot Commands**
 
-**Group Commands:**
+**Available Commands:**
+• "@KnowledgeBot list" - Show completed (this week) and all pending QA reminders
 • "@KnowledgeBot debug" - Show group ID and debug info
-• "@KnowledgeBot help" - Show this help message
 
 **Private Commands:**
 • Send me "help" privately for more commands
@@ -1219,7 +1347,7 @@ func handleGroupMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 • Click Nothing to update button if knowledge base is already clean and sleek`
 
 		if err := SendMessageToGroup(ctx, helpMsg, reqSOP.Event.GroupID); err != nil {
-			log.Printf("ERROR: Failed to send help message to group: %v", err)
+			log.Printf("ERROR: Failed to send default help message to group: %v", err)
 		}
 	}
 }
@@ -1242,12 +1370,17 @@ func handleButtonClick(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 	// Format can be either:
 	//   - SPB-12345 (new format without timestamp)
 	//   - SPB-12345_timestamp (old format with timestamp for backward compatibility)
+	//   - MOCK_SPB-12345 (mock reminder format)
 	ticketKey := messageID
-	if strings.Contains(messageID, "_") {
+	if strings.HasPrefix(messageID, "MOCK_") {
+		// For mock reminders, remove the MOCK_ prefix
+		ticketKey = strings.TrimPrefix(messageID, "MOCK_")
+	} else if strings.Contains(messageID, "_") {
+		// For regular reminders with timestamp, take the first part
 		ticketKey = strings.Split(messageID, "_")[0]
 	}
 
-	// Check user's previous responses to this alert FIRST (before authorization)
+	// Check user's previous responses to this alert FIRST (before au@thorization)
 	// This handles duplicate clicks gracefully
 	responseMutex.Lock()
 	if alertResponses[messageID] == nil {
@@ -1313,12 +1446,16 @@ func handleButtonClick(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 		targetGroupID = groupID // Use the configured group ID
 	}
 
+	// Use the stored MessageID as thread ID for proper threading
+	// This follows the SeaTalk pattern: "define thread_id as the message_id of the root message"
+	threadID := authorizedReminder.MessageID
+
 	// Process the button click
 	switch buttonType {
 	case "complete":
-		handleKnowledgeBaseComplete(ctx, reqSOP.Event, targetGroupID, isSecondButton, ticketKey)
+		handleKnowledgeBaseComplete(ctx, reqSOP.Event, targetGroupID, threadID, isSecondButton, ticketKey)
 	case "cancel":
-		handleKnowledgeBaseCancel(ctx, reqSOP.Event, targetGroupID, isSecondButton, ticketKey)
+		handleKnowledgeBaseCancel(ctx, reqSOP.Event, targetGroupID, threadID, isSecondButton, ticketKey)
 	}
 
 	// Mark QA reminder as completed for both button types
@@ -1340,7 +1477,7 @@ func markQAReminderCompleted(employeeCode, messageID string) {
 	}
 }
 
-func handleKnowledgeBaseComplete(ctx *gin.Context, event Event, groupID string, isSecondButton bool, ticketKey string) {
+func handleKnowledgeBaseComplete(ctx *gin.Context, event Event, groupID, threadID string, isSecondButton bool, ticketKey string) {
 	displayName := getEmployeeDisplayName(event)
 	completedTime := time.Now()
 
@@ -1388,12 +1525,19 @@ func handleKnowledgeBaseComplete(ctx *gin.Context, event Event, groupID string, 
 		cheerMessage,
 	)
 
-	if err := SendMessageToGroup(ctx, confirmMsg, groupID); err != nil {
-		log.Printf("ERROR: Failed to send completion confirmation: %v", err)
+	// Send response in thread if threadID is available, otherwise send as regular group message
+	if threadID != "" {
+		if err := SendMessageToThread(ctx, confirmMsg, groupID, threadID); err != nil {
+			log.Printf("ERROR: Failed to send completion confirmation to thread: %v", err)
+		}
+	} else {
+		if err := SendMessageToGroup(ctx, confirmMsg, groupID); err != nil {
+			log.Printf("ERROR: Failed to send completion confirmation: %v", err)
+		}
 	}
 }
 
-func handleKnowledgeBaseCancel(ctx *gin.Context, event Event, groupID string, isSecondButton bool, ticketKey string) {
+func handleKnowledgeBaseCancel(ctx *gin.Context, event Event, groupID, threadID string, isSecondButton bool, ticketKey string) {
 	displayName := getEmployeeDisplayName(event)
 	cancelledTime := time.Now()
 
@@ -1438,8 +1582,15 @@ func handleKnowledgeBaseCancel(ctx *gin.Context, event Event, groupID string, is
 		durationMsg,
 	)
 
-	if err := SendMessageToGroup(ctx, cancelMsg, groupID); err != nil {
-		log.Printf("ERROR: Failed to send cancellation confirmation: %v", err)
+	// Send response in thread if threadID is available, otherwise send as regular group message
+	if threadID != "" {
+		if err := SendMessageToThread(ctx, cancelMsg, groupID, threadID); err != nil {
+			log.Printf("ERROR: Failed to send cancellation confirmation to thread: %v", err)
+		}
+	} else {
+		if err := SendMessageToGroup(ctx, cancelMsg, groupID); err != nil {
+			log.Printf("ERROR: Failed to send cancellation confirmation: %v", err)
+		}
 	}
 }
 
