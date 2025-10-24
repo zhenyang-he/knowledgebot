@@ -154,13 +154,14 @@ type SOPSendThreadMessage struct {
 	GroupID         string     `json:"group_id"`
 	Message         SOPMessage `json:"message"`
 	QuotedMessageID string     `json:"quoted_message_id"`
-	ThreadID        string     `json:"thread_id"`
 }
 
 type SOPMessage struct {
 	Tag                string                 `json:"tag"`
 	Text               *SOPTextMsg            `json:"text,omitempty"`
 	InteractiveMessage *SOPInteractiveMessage `json:"interactive_message,omitempty"`
+	QuotedMessageID    string                 `json:"quoted_message_id,omitempty"`
+	ThreadID           string                 `json:"thread_id,omitempty"`
 }
 
 type SOPInteractiveMessage struct {
@@ -492,9 +493,9 @@ func SendMessageToThread(ctx context.Context, message, groupID, threadID string)
 				Format:  1, // Rich text format (use 2 for plain text)
 				Content: message,
 			},
+			QuotedMessageID: "", // Should be empty for threading
+			ThreadID:        threadID,
 		},
-		QuotedMessageID: threadID, // Empty as per documentation
-		ThreadID:        threadID,
 	})
 
 	req, _ := http.NewRequest("POST", "https://openapi.seatalk.io/messaging/v2/group_chat", bytes.NewBuffer(bodyJson))
@@ -945,16 +946,29 @@ Click the appropriate button below when done:`,
 		jiraURL,
 		reviewDate)
 
-	// Use the common helper function with consistent button ID per ticket (no timestamp)
-	// This ensures buttons from group and status messages are linked
-	buttonID := ticket.Key
-	if isMock {
-		buttonID = "MOCK_" + ticket.Key
-	}
-	messageID, err := SendInteractiveMessageToGroup(context.Background(), groupID, title, description, buttonID)
-	if err != nil {
-		log.Printf("ERROR: Failed to send QA reminder: %v", err)
-		return err
+	// For follow-ups, send as a thread reply instead of a new interactive message
+	var messageID string
+	var err error
+
+	if isFollowUp && !isMock {
+		// Send as thread reply using the original message ID as thread ID
+		if err := SendMessageToThread(context.Background(), description, groupID, existingReminder.MessageID); err != nil {
+			log.Printf("ERROR: Failed to send follow-up reminder in thread: %v", err)
+			return err
+		}
+		// For follow-ups, we don't need a new messageID since we're replying in thread
+		messageID = existingReminder.MessageID
+	} else {
+		// For new reminders, send as interactive message with buttons
+		buttonID := ticket.Key
+		if isMock {
+			buttonID = "MOCK_" + ticket.Key
+		}
+		messageID, err = SendInteractiveMessageToGroup(context.Background(), groupID, title, description, buttonID)
+		if err != nil {
+			log.Printf("ERROR: Failed to send QA reminder: %v", err)
+			return err
+		}
 	}
 
 	// Track the reminder
