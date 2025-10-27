@@ -1262,7 +1262,7 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 **Automated Features:**
 • Daily 10am Jira QA reminders for tickets moved to 2nd review past 2 days
 • 24-hour follow-up reminders until completion
-• Weekly cleanup (Mondays 12am) removes all completed reminders
+• Bi-weekly cleanup (every 2 weeks on Mondays 12am) removes all completed reminders
 
 **Group Messages:**
 • "@KnowledgeBot debug" - Show group ID and debug info
@@ -1618,9 +1618,12 @@ func contains(slice []string, item string) bool {
 	return false
 }
 
-// Start cleanup scheduler to remove completed reminders every Monday at 12am
+// Start cleanup scheduler to remove completed reminders every 2 weeks on Monday at 12am
 func startReminderCleanup() {
-	log.Println("INFO: Starting reminder cleanup scheduler (runs Mondays at 12am)")
+	log.Println("INFO: Starting reminder cleanup scheduler (runs every 2 weeks on Monday at 12am)")
+
+	// Track if we've run cleanup this cycle
+	cleanupRun := false
 
 	for {
 		now := time.Now()
@@ -1643,9 +1646,15 @@ func startReminderCleanup() {
 		sleepDuration := nextMonday.Sub(now)
 		time.Sleep(sleepDuration)
 
-		log.Println("INFO: Running weekly reminder cleanup (Monday 12am)")
-		if err := cleanupOldReminders(); err != nil {
-			log.Printf("ERROR: Failed to cleanup old reminders: %v", err)
+		// Only run cleanup every 2 weeks (alternate Mondays)
+		if !cleanupRun {
+			log.Println("INFO: Running bi-weekly reminder cleanup (Monday 12am)")
+			if err := cleanupOldReminders(); err != nil {
+				log.Printf("ERROR: Failed to cleanup old reminders: %v", err)
+			}
+			cleanupRun = true
+		} else {
+			cleanupRun = false
 		}
 
 		// Sleep for a minute to avoid running multiple times
@@ -1798,6 +1807,30 @@ func getGroupMembers() []GroupMember {
 		{
 			Email:       "vijay.krishnamraju@shopee.com",
 			DisplayName: formatEmailAsName("vijay.krishnamraju@shopee.com"),
+		},
+		{
+			Email:       "allyson.turiano@shopee.com",
+			DisplayName: formatEmailAsName("allyson.turiano@shopee.com"),
+		},
+		{
+			Email:       "ayush.bansal@shopee.com",
+			DisplayName: formatEmailAsName("ayush.bansal@shopee.com"),
+		},
+		{
+			Email:       "jingrui.hu@shopee.com",
+			DisplayName: formatEmailAsName("jingrui.hu@shopee.com"),
+		},
+		{
+			Email:       "joey.chengxy@shopee.com",
+			DisplayName: formatEmailAsName("joey.chengxy@shopee.com"),
+		},
+		{
+			Email:       "kangloon.ng@shopee.com",
+			DisplayName: formatEmailAsName("kangloon.ng@shopee.com"),
+		},
+		{
+			Email:       "shaoyun.tan@shopee.com",
+			DisplayName: formatEmailAsName("shaoyun.tan@shopee.com"),
 		},
 	}
 
