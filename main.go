@@ -39,29 +39,14 @@ type JiraConfig struct {
 }
 
 type JiraIssue struct {
-	Key       string        `json:"key"`
-	Fields    JiraFields    `json:"fields"`
-	Changelog JiraChangelog `json:"changelog,omitempty"`
+	Key    string     `json:"key"`
+	Fields JiraFields `json:"fields"`
 }
 
 type JiraFields struct {
 	// Only the essential fields we need
-	Status JiraStatus `json:"status"`
-	// We'll get the status change date from the changelog/history
-}
-
-type JiraChangelog struct {
-	Histories []JiraHistory `json:"histories"`
-}
-
-type JiraHistory struct {
-	Created string            `json:"created"`
-	Items   []JiraHistoryItem `json:"items"`
-}
-
-type JiraHistoryItem struct {
-	Field    string `json:"field"`
-	ToString string `json:"toString"`
+	Status  JiraStatus `json:"status"`
+	Updated string     `json:"updated"`
 }
 
 type JiraStatus struct {
@@ -633,13 +618,13 @@ func makeJiraRequest(method, endpoint string, body []byte) (*http.Response, erro
 }
 
 func searchJiraQATickets(qaEmail string) ([]JiraIssue, error) {
-	// Use the exact JQL query that works in the browser
-	jql := fmt.Sprintf("status in (\"2ND REVIEW\") AND QA in (\"%s\")", qaEmail)
+	// Query tickets in any status from the QA workflow (2ND REVIEW, UAT, STAGING, REGRESSION, DELIVERING, LIVE TESTING, DONE)
+	jql := fmt.Sprintf("status in (\"2ND REVIEW\", \"UAT\", \"STAGING\", \"REGRESSION\", \"DELIVERING\", \"LIVE TESTING\", \"DONE\") AND QA in (\"%s\")", qaEmail)
 
 	// URL encode the JQL query
 	encodedJQL := url.QueryEscape(jql)
 
-	endpoint := fmt.Sprintf("/rest/api/2/search?jql=%s&maxResults=50&fields=status&expand=changelog", encodedJQL)
+	endpoint := fmt.Sprintf("/rest/api/2/search?jql=%s&maxResults=50&fields=status,updated", encodedJQL)
 	resp, err := makeJiraRequest("GET", endpoint, nil)
 	if err != nil {
 		log.Printf("ERROR: Failed to search Jira tickets for %s: %v", qaEmail, err)
@@ -731,8 +716,8 @@ func processQAReminders() (int, error) {
 		for _, ticket := range tickets {
 			reminderKey := ticket.Key
 
-			// Filter 1: Check if ticket was moved to 2nd review within last 2 business days
-			if !wasMovedToSecondReviewRecently(&ticket) {
+			// Filter 1: Check if ticket has completed testing within last 2 business days
+			if !completedTestingRecently(&ticket) {
 				continue
 			}
 
@@ -808,7 +793,7 @@ func processFollowUpReminders() error {
 }
 
 func getJiraIssue(issueKey string) (*JiraIssue, error) {
-	resp, err := makeJiraRequest("GET", "/rest/api/2/issue/"+issueKey+"?fields=status&expand=changelog", nil)
+	resp, err := makeJiraRequest("GET", "/rest/api/2/issue/"+issueKey+"?fields=status,updated", nil)
 	if err != nil {
 		log.Printf("ERROR: Failed to fetch Jira issue %s: %v", issueKey, err)
 		return nil, err
@@ -830,31 +815,29 @@ func getJiraIssue(issueKey string) (*JiraIssue, error) {
 	return &issue, nil
 }
 
-// Get the time when the issue was moved to "2ND REVIEW" status (returns the parsed time.Time)
-func getSecondReviewTime(issue *JiraIssue) (time.Time, error) {
-	for _, history := range issue.Changelog.Histories {
-		for _, item := range history.Items {
-			if item.Field == "status" && item.ToString == "2ND REVIEW" {
-				// Parse the Jira timestamp
-				t, err := time.Parse("2006-01-02T15:04:05.999-0700", history.Created)
-				if err != nil {
-					// Try alternative format
-					t, err = time.Parse(time.RFC3339, history.Created)
-					if err != nil {
-						log.Printf("WARN: Failed to parse date %s: %v", history.Created, err)
-						return time.Time{}, err
-					}
-				}
-				return t, nil
-			}
+// This is used to determine if a ticket completed testing recently
+func recentlyCompletedTestingTime(issue *JiraIssue) (time.Time, error) {
+	// Use the updated time from the Jira ticket
+	if issue.Fields.Updated == "" {
+		return time.Time{}, fmt.Errorf("no updated time found")
+	}
+
+	// Parse the Jira timestamp
+	t, err := time.Parse("2006-01-02T15:04:05.999-0700", issue.Fields.Updated)
+	if err != nil {
+		// Try alternative format
+		t, err = time.Parse(time.RFC3339, issue.Fields.Updated)
+		if err != nil {
+			log.Printf("WARN: Failed to parse updated date %s: %v", issue.Fields.Updated, err)
+			return time.Time{}, err
 		}
 	}
-	return time.Time{}, fmt.Errorf("no 2ND REVIEW status change found")
+	return t, nil
 }
 
-// Get the date when the issue was moved to "2ND REVIEW" status (formatted string)
-func getSecondReviewDate(issue *JiraIssue) string {
-	reviewTime, err := getSecondReviewTime(issue)
+// This is used to display when a ticket completed testing recently
+func getRecentlyCompletedTestingDate(issue *JiraIssue) string {
+	reviewTime, err := recentlyCompletedTestingTime(issue)
 	if err != nil {
 		// Fallback to current time if not found
 		return time.Now().Format("02 Jan 2006")
@@ -863,9 +846,9 @@ func getSecondReviewDate(issue *JiraIssue) string {
 	return reviewTime.Format("02 Jan 2006")
 }
 
-// Check if ticket was moved to 2nd review on today or previous business day
-func wasMovedToSecondReviewRecently(issue *JiraIssue) bool {
-	reviewTime, err := getSecondReviewTime(issue)
+// Check if ticket completed testing today or previous business day
+func completedTestingRecently(issue *JiraIssue) bool {
+	reviewTime, err := recentlyCompletedTestingTime(issue)
 	if err != nil {
 		return false
 	}
@@ -904,8 +887,8 @@ func sendQAReminder(ticket JiraIssue, qa GroupMember, isMock bool) error {
 	// Create Jira ticket URL
 	jiraURL := fmt.Sprintf("%s/browse/%s", jiraConfig.BaseURL, ticket.Key)
 
-	// Get the date when ticket moved to 2nd Review
-	reviewDate := getSecondReviewDate(&ticket)
+	// Get the date when ticket recently completed testing
+	recentlyCompletedTestingDate := getRecentlyCompletedTestingDate(&ticket)
 
 	// Check if this is a follow-up (reminder already exists)
 	reminderMutex.RLock()
@@ -931,7 +914,7 @@ func sendQAReminder(ticket JiraIssue, qa GroupMember, isMock bool) error {
 	description := fmt.Sprintf(`
 %s
 **Jira Ticket:** %s
-**Date moved to 2nd Review:** %s
+**Completed testing recently:** %s
 
 📝 **Tasks to consider:**
 • Review and update outdated information and data preparation steps
@@ -944,7 +927,7 @@ https://docs.google.com/spreadsheets/d/1QlBZniYwL5VqKW1KQxjTs4LEGqOJ8YWRFTLhX-MZ
 Click the appropriate button below when done:`,
 		qaField,
 		jiraURL,
-		reviewDate)
+		recentlyCompletedTestingDate)
 
 	// For follow-ups, send as a thread reply instead of a new interactive message
 	var messageID string
@@ -1011,8 +994,8 @@ func sendStatusReminderToUser(reminder *QAReminder, employeeCode string) error {
 	// Create Jira ticket URL
 	jiraURL := fmt.Sprintf("%s/browse/%s", jiraConfig.BaseURL, reminder.IssueKey)
 
-	// Get the date when ticket moved to 2nd Review
-	reviewDate := getSecondReviewDate(ticket)
+	// Get the date when ticket recently completed testing
+	recentlyCompletedTestingDate := getRecentlyCompletedTestingDate(ticket)
 
 	// Calculate how long ago the reminder was sent
 	timeSinceSent := time.Since(reminder.SentTime)
@@ -1020,12 +1003,12 @@ func sendStatusReminderToUser(reminder *QAReminder, employeeCode string) error {
 
 	// Create description
 	description := fmt.Sprintf(`🎫 **Jira Ticket:** %s
-📅 **Moved to 2nd Review:** %s
+📅 **Completed Testing recently:** %s
 ⏰ **Reminder Sent:** %s ago
 
 Please review and update the knowledge base accordingly.
 
-Click the appropriate button when done:`, jiraURL, reviewDate, sentAgo)
+Click the appropriate button when done:`, jiraURL, recentlyCompletedTestingDate, sentAgo)
 
 	// Create interactive message with buttons
 	title := fmt.Sprintf("📚 Knowledge Base Reminder: %s", reminder.IssueKey)
@@ -1662,23 +1645,49 @@ func startReminderCleanup() {
 	}
 }
 
-// Remove all completed reminders before current time
+// Remove completed reminders older than 2 business days
 func cleanupOldReminders() error {
 	now := time.Now()
+
+	// Calculate cutoff time: 2 business days ago
+	var cutoffTime time.Time
+	switch now.Weekday() {
+	case time.Monday:
+		// Monday: go back to last Wednesday
+		cutoffTime = now.AddDate(0, 0, -5)
+	case time.Tuesday:
+		// Tuesday: go back to last Thursday
+		cutoffTime = now.AddDate(0, 0, -5)
+	case time.Wednesday:
+		// Wednesday: go back to last Friday
+		cutoffTime = now.AddDate(0, 0, -5)
+	case time.Thursday:
+		// Thursday: go back to last Monday
+		cutoffTime = now.AddDate(0, 0, -3)
+	case time.Friday:
+		// Friday: go back to last Tuesday
+		cutoffTime = now.AddDate(0, 0, -3)
+	case time.Saturday:
+		// Saturday: go back to last Thursday
+		cutoffTime = now.AddDate(0, 0, -2)
+	case time.Sunday:
+		// Sunday: go back to last Thursday
+		cutoffTime = now.AddDate(0, 0, -3)
+	}
 
 	reminderMutex.Lock()
 	defer reminderMutex.Unlock()
 
 	removedCount := 0
 	for issueKey, reminder := range qaReminders {
-		if reminder.Completed && reminder.LastSentTime.Before(now) {
+		if reminder.Completed && reminder.LastSentTime.Before(cutoffTime) {
 			delete(qaReminders, issueKey)
 			removedCount++
 			log.Printf("INFO: Removed completed reminder for %s (completed on %s)", issueKey, reminder.LastSentTime.Format("2006-01-02 15:04"))
 		}
 	}
 
-	log.Printf("INFO: Cleanup complete. Removed %d completed reminders", removedCount)
+	log.Printf("INFO: Cleanup complete. Removed %d completed reminders older than 2 business days", removedCount)
 	return nil
 }
 
