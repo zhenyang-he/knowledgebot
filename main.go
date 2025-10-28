@@ -62,7 +62,6 @@ type JiraIssuetype struct {
 
 type JiraSearchResult struct {
 	Issues []JiraIssue `json:"issues"`
-	Total  int         `json:"total"`
 }
 
 // QA Reminder tracking
@@ -81,9 +80,8 @@ type QAReminder struct {
 
 // Group member info
 type GroupMember struct {
-	EmployeeCode string `json:"employee_code"`
-	DisplayName  string `json:"display_name"`
-	Email        string `json:"email"`
+	DisplayName string `json:"display_name"`
+	Email       string `json:"email"`
 }
 
 type SOPEventVerificationResp struct {
@@ -91,27 +89,14 @@ type SOPEventVerificationResp struct {
 }
 
 type Event struct {
-	SeatalkChallenge string          `json:"seatalk_challenge"`
-	EmployeeCode     string          `json:"employee_code"`
-	EmployeeName     string          `json:"employee_name"`
-	UserName         string          `json:"user_name"`
-	DisplayName      string          `json:"display_name"`
-	FullName         string          `json:"full_name"`
-	Email            string          `json:"email"`
-	GroupID          string          `json:"group_id"`
-	Message          Message         `json:"message"`
-	InteractiveData  InteractiveData `json:"interactive_data"`
-	MessageID        string          `json:"message_id"`
-	Value            string          `json:"value"`
-	SeatalkID        string          `json:"seatalk_id"`
-	ThreadID         string          `json:"thread_id"`
-}
-
-type InteractiveData struct {
-	ActionID     string `json:"action_id"`
-	Value        string `json:"value"`
-	ButtonValue  string `json:"button_value"`
-	CallbackData string `json:"callback_data"`
+	SeatalkChallenge string  `json:"seatalk_challenge"`
+	EmployeeCode     string  `json:"employee_code"`
+	DisplayName      string  `json:"display_name"`
+	Email            string  `json:"email"`
+	GroupID          string  `json:"group_id"`
+	Message          Message `json:"message"`
+	MessageID        string  `json:"message_id"`
+	Value            string  `json:"value"`
 }
 
 type Message struct {
@@ -149,7 +134,6 @@ type SOPMessage struct {
 	Tag                string                 `json:"tag"`
 	Text               *SOPTextMsg            `json:"text,omitempty"`
 	InteractiveMessage *SOPInteractiveMessage `json:"interactive_message,omitempty"`
-	QuotedMessageID    string                 `json:"quoted_message_id,omitempty"`
 	ThreadID           string                 `json:"thread_id,omitempty"`
 }
 
@@ -592,8 +576,7 @@ func SendMessageToThread(ctx context.Context, message, groupID, threadID string)
 				Format:  1, // Rich text format (use 2 for plain text)
 				Content: message,
 			},
-			QuotedMessageID: "", // Should be empty for threading
-			ThreadID:        threadID,
+			ThreadID: threadID,
 		},
 	})
 
@@ -673,7 +656,6 @@ func SendInteractiveMessageToGroup(ctx context.Context, groupID, title, descript
 	// Add thread ID if provided
 	if len(threadID) > 0 && threadID[0] != "" {
 		message.ThreadID = threadID[0]
-		message.QuotedMessageID = "" // Should be empty for threading
 	}
 
 	// Always use SOPSendMessageToGroup (threading handled by ThreadID in message)
