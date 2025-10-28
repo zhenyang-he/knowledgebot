@@ -249,7 +249,7 @@ func generateKnowledgeBaseList() string {
 
 		for _, qaName := range qaNames {
 			listMsg.WriteString(fmt.Sprintf("**By %s**\n", qaName))
-			for _, reminder := range completedByQA[qaName] {
+			for i, reminder := range completedByQA[qaName] {
 				jiraURL := fmt.Sprintf("%s/browse/%s", jiraConfig.BaseURL, reminder.IssueKey)
 				completedTime := reminder.LastSentTime.Format("Mon 3:04 PM")
 
@@ -264,12 +264,8 @@ func generateKnowledgeBaseList() string {
 					statusText = ""
 				}
 
-				// Use stored summary
-				if reminder.Summary != "" {
-					listMsg.WriteString(fmt.Sprintf("- %s%s (%s)\n%s\n", jiraURL, statusText, completedTime, reminder.Summary))
-				} else {
-					listMsg.WriteString(fmt.Sprintf("- %s%s (%s)\n", jiraURL, statusText, completedTime))
-				}
+				// Display as numbered list
+				listMsg.WriteString(fmt.Sprintf("%d) %s%s (%s)\n", i+1, jiraURL, statusText, completedTime))
 			}
 			listMsg.WriteString("\n")
 		}
@@ -288,14 +284,10 @@ func generateKnowledgeBaseList() string {
 
 		for _, qaName := range qaNames {
 			listMsg.WriteString(fmt.Sprintf("**By %s**\n", qaName))
-			for _, reminder := range pendingByQA[qaName] {
+			for i, reminder := range pendingByQA[qaName] {
 				jiraURL := fmt.Sprintf("%s/browse/%s", jiraConfig.BaseURL, reminder.IssueKey)
-				// Use stored summary
-				if reminder.Summary != "" {
-					listMsg.WriteString(fmt.Sprintf("- %s\n%s\n", jiraURL, reminder.Summary))
-				} else {
-					listMsg.WriteString(fmt.Sprintf("- %s\n", jiraURL))
-				}
+				// Display as numbered list
+				listMsg.WriteString(fmt.Sprintf("%d) %s\n", i+1, jiraURL))
 			}
 			listMsg.WriteString("\n")
 		}
@@ -691,6 +683,54 @@ func SendInteractiveMessageToGroup(ctx context.Context, groupID, title, descript
 	return resp.MessageID, nil
 }
 
+// Retry function with exponential backoff for API calls
+func retryWithBackoff(operation func() error, maxRetries int) error {
+	var lastErr error
+	for i := 0; i < maxRetries; i++ {
+		err := operation()
+		if err == nil {
+			return nil
+		}
+
+		lastErr = err
+
+		// Check if it's a 101 error (rate limiting/auth issue)
+		if strings.Contains(err.Error(), "response code: 101") || strings.Contains(err.Error(), "API error code: 101") {
+			// Exponential backoff: 1s, 2s, 4s, 8s, 16s
+			backoffDuration := time.Duration(1<<uint(i)) * time.Second
+			log.Printf("WARN: API error 101, retrying in %v (attempt %d/%d)", backoffDuration, i+1, maxRetries)
+			time.Sleep(backoffDuration)
+		} else {
+			// For other errors, don't retry
+			return err
+		}
+	}
+
+	return fmt.Errorf("operation failed after %d retries, last error: %v", maxRetries, lastErr)
+}
+
+// Wrapper functions with retry logic
+func SendInteractiveMessageToGroupWithRetry(ctx context.Context, groupID, title, description, buttonID string, threadID ...string) (string, error) {
+	var result string
+	var err error
+
+	retryErr := retryWithBackoff(func() error {
+		result, err = SendInteractiveMessageToGroup(ctx, groupID, title, description, buttonID, threadID...)
+		return err
+	}, 3) // Retry up to 3 times
+
+	if retryErr != nil {
+		return "", retryErr
+	}
+	return result, nil
+}
+
+func SendMessageToThreadWithRetry(ctx context.Context, message, groupID, threadID string) error {
+	return retryWithBackoff(func() error {
+		return SendMessageToThread(ctx, message, groupID, threadID)
+	}, 3) // Retry up to 3 times
+}
+
 // Send instructions as thread reply
 func sendInstructionsAsThreadReply(groupID, threadID string) error {
 	instructions := `📝 **Tasks to consider:**
@@ -701,14 +741,14 @@ func sendInstructionsAsThreadReply(groupID, threadID string) error {
 📊 **Please review and update the knowledge base accordingly:**
 https://docs.google.com/spreadsheets/d/1QlBZniYwL5VqKW1KQxjTs4LEGqOJ8YWRFTLhX-MZBtU/edit?gid=0#gid=0`
 
-	return SendMessageToThread(context.Background(), instructions, groupID, threadID)
+	return SendMessageToThreadWithRetry(context.Background(), instructions, groupID, threadID)
 }
 
 // Send main QA reminder (QA field only, no buttons)
 func sendMainQAReminder(qa GroupMember, ticketCount int) (string, error) {
 	title := "**📚 Knowledge Base Reminder**"
-	// qaField := fmt.Sprintf("**QA:** <mention-tag target=\"seatalk://user?email=%s\"/> (cc: <mention-tag target=\"seatalk://user?email=shuang.xiao@shopee.com\"/>)", qa.Email)
-	qaField := fmt.Sprintf("**QA:** <mention-tag target=\"seatalk://user?email=%s\"/>", qa.Email)
+	qaField := fmt.Sprintf("**QA:** <mention-tag target=\"seatalk://user?email=%s\"/> (cc: <mention-tag target=\"seatalk://user?email=shuang.xiao@shopee.com\"/>)", qa.Email)
+	// qaField := fmt.Sprintf("**QA:** <mention-tag target=\"seatalk://user?email=%s\"/>", qa.Email)
 	message := fmt.Sprintf("%s\n%s\n📊 **Total tickets to review:** %d", title, qaField, ticketCount)
 
 	// Send as plain text message without buttons
@@ -760,7 +800,7 @@ func decreaseReminderCount(qaEmail string) {
 func sendTicketReminder(ticket JiraIssue, qa GroupMember, threadID string) error {
 	jiraTicketWithTitle := formatJiraTicketWithTitle(&ticket)
 
-	// Get the next reminder number for this QA
+	// Get the next reminder number for this QA (but don't commit until success)
 	reminderNumber := getNextReminderNumber(qa.Email)
 	title := fmt.Sprintf("📚 Knowledge Base Reminder %d", reminderNumber)
 
@@ -770,8 +810,10 @@ Click the appropriate button below when done:`,
 		jiraTicketWithTitle)
 
 	buttonID := ticket.Key
-	messageID, err := SendInteractiveMessageToGroup(context.Background(), groupID, title, description, buttonID, threadID)
+	messageID, err := SendInteractiveMessageToGroupWithRetry(context.Background(), groupID, title, description, buttonID, threadID)
 	if err != nil {
+		// If sending fails, decrement the counter to "unuse" the number
+		decreaseReminderCount(qa.Email)
 		return err
 	}
 
@@ -1000,11 +1042,26 @@ func processQAReminders() (int, error) {
 
 		// Send individual ticket reminders as thread replies
 		sentCount := 0
+		failedTickets := []JiraIssue{}
 		for _, ticket := range eligibleTickets {
 			if err := sendTicketReminder(ticket, member, mainMessageID); err != nil {
 				log.Printf("ERROR: Failed to send ticket reminder for %s to %s: %v", ticket.Key, member.DisplayName, err)
+				failedTickets = append(failedTickets, ticket)
 			} else {
 				sentCount++
+			}
+		}
+
+		// Send summary message if there were failed tickets
+		if len(failedTickets) > 0 {
+			summaryMsg := fmt.Sprintf("**Updated total tickets to review:** %d\n**Total tickets failed to send:** %d\n\n**Jira tickets:**\n", len(eligibleTickets), len(failedTickets))
+			for _, ticket := range failedTickets {
+				jiraURL := fmt.Sprintf("%s/browse/%s", jiraConfig.BaseURL, ticket.Key)
+				summaryMsg += fmt.Sprintf("- %s\n", jiraURL)
+			}
+
+			if err := SendMessageToThreadWithRetry(context.Background(), summaryMsg, groupID, mainMessageID); err != nil {
+				log.Printf("ERROR: Failed to send summary message for %s: %v", member.DisplayName, err)
 			}
 		}
 
@@ -1650,7 +1707,7 @@ func handleKnowledgeBaseComplete(ctx *gin.Context, event Event, groupID, threadI
 	// Send response in thread if threadID is available, otherwise send as regular group message
 	log.Printf("DEBUG: Sending completion confirmation - threadID: %s, groupID: %s", threadID, groupID)
 	if threadID != "" {
-		if err := SendMessageToThread(ctx, confirmMsg, groupID, threadID); err != nil {
+		if err := SendMessageToThreadWithRetry(ctx, confirmMsg, groupID, threadID); err != nil {
 			log.Printf("ERROR: Failed to send completion confirmation to thread: %v", err)
 		} else {
 			log.Printf("INFO: Successfully sent completion confirmation to thread %s", threadID)
@@ -1718,7 +1775,7 @@ func handleKnowledgeBaseCancel(ctx *gin.Context, event Event, groupID, threadID 
 
 	// Send response in thread if threadID is available, otherwise send as regular group message
 	if threadID != "" {
-		if err := SendMessageToThread(ctx, cancelMsg, groupID, threadID); err != nil {
+		if err := SendMessageToThreadWithRetry(ctx, cancelMsg, groupID, threadID); err != nil {
 			log.Printf("ERROR: Failed to send cancellation confirmation to thread: %v", err)
 		}
 	} else {
