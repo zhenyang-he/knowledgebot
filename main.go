@@ -952,20 +952,30 @@ func startQAReminder() {
 	log.Println("INFO: Starting QA reminder scheduler")
 
 	for {
-		now := time.Now()
+		// Load Singapore timezone (GMT+8)
+		location, err := time.LoadLocation("Asia/Singapore")
+		if err != nil {
+			location = time.UTC
+		}
+		now := time.Now().In(location)
 
-		// Calculate next 10am
-		next10am := time.Date(now.Year(), now.Month(), now.Day(), 10, 0, 0, 0, now.Location())
+		// Calculate next 10:00 AM in GMT+8
+		next10am := time.Date(now.Year(), now.Month(), now.Day(), 10, 0, 0, 0, location)
 		if now.After(next10am) {
+			// If it's already past 10:00 today, schedule for tomorrow
 			next10am = next10am.Add(24 * time.Hour)
 		}
 
-		// Wait until 10am
+		// Skip weekends - find next weekday
+		for next10am.Weekday() == time.Saturday || next10am.Weekday() == time.Sunday {
+			next10am = next10am.Add(24 * time.Hour)
+		}
+
 		sleepDuration := next10am.Sub(now)
-		log.Printf("INFO: Next QA reminder scheduled for %s (in %s)", next10am.Format("2006-01-02 15:04:05"), sleepDuration)
+		log.Printf("INFO: Next QA reminder scheduled for %s GMT+8 (in %s)", next10am.Format("2006-01-02 15:04:05"), sleepDuration)
 		time.Sleep(sleepDuration)
 
-		// Skip weekends
+		// Skip weekends (already handled in the loop above)
 		if next10am.Weekday() == time.Saturday || next10am.Weekday() == time.Sunday {
 			continue
 		}
@@ -1441,7 +1451,7 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 - cleanup (happens every 2 weeks) will remove completed reminders older than 2 working days
 
 **For Manager:**
-- can manually trigger query jira tickets via bot with "jira" or auto triggered every working day at 10am
+- can manually trigger query jira tickets via bot with "jira" or auto triggered every working day at 10am GMT+8
 - can check all pending qa reminders via bot with "list" to see all pending and completed reminders for the past and current week
 
 **For Members:**
