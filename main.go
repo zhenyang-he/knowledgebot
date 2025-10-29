@@ -318,8 +318,8 @@ func main() {
 	r.GET("/", healthHandler)
 	r.HEAD("/", healthHandler)
 
-	// Callback endpoint with signature validation
-	r.POST("/callback", WithSOPSignatureValidation(), func(ctx *gin.Context) {
+	// Callback endpoint with conditional signature validation
+	r.POST("/callback", func(ctx *gin.Context) {
 		var reqSOP SOPEventCallbackReq
 		if err := ctx.ShouldBindJSON(&reqSOP); err != nil {
 			ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid JSON: " + err.Error()})
@@ -327,9 +327,18 @@ func main() {
 		}
 		log.Printf("INFO: received event with event_type %s", reqSOP.EventType)
 
-		switch reqSOP.EventType {
-		case "event_verification":
+		// Handle verification requests without signature validation
+		if reqSOP.EventType == "event_verification" {
 			ctx.JSON(http.StatusOK, SOPEventVerificationResp{SeatalkChallenge: reqSOP.Event.SeatalkChallenge})
+			return
+		}
+
+		// For other events, validate signature
+		if !validateSignature(ctx) {
+			return
+		}
+
+		switch reqSOP.EventType {
 		case "interactive_message_click":
 			handleButtonClick(ctx, reqSOP)
 			ctx.JSON(http.StatusOK, "Success")
@@ -385,38 +394,46 @@ func main() {
 	}
 }
 
+func validateSignature(ctx *gin.Context) bool {
+	r := ctx.Request
+	signature := r.Header.Get("signature")
+
+	if signature == "" {
+		ctx.JSON(http.StatusForbidden, gin.H{"error": "missing signature"})
+		return false
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return false
+	}
+
+	hasher := sha256.New()
+	signingSecret := getEnvOrDefault("SEATALK_SIGNING_SECRET", "")
+	if signingSecret == "" {
+		log.Printf("ERROR: SeaTalk signing secret not configured. Please set SEATALK_SIGNING_SECRET environment variable")
+		ctx.JSON(http.StatusForbidden, gin.H{"error": "signing secret not configured"})
+		return false
+	}
+	hasher.Write(append(body, []byte(signingSecret)...))
+	targetSignature := hex.EncodeToString(hasher.Sum(nil))
+
+	if signature != targetSignature {
+		ctx.JSON(http.StatusForbidden, gin.H{"error": "invalid signature"})
+		return false
+	}
+
+	// Reset the request body for the next handler
+	ctx.Request.Body = io.NopCloser(bytes.NewReader(body))
+	return true
+}
+
 func WithSOPSignatureValidation() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		r := ctx.Request
-		signature := r.Header.Get("signature")
-
-		if signature == "" {
-			ctx.JSON(http.StatusForbidden, nil)
+		if !validateSignature(ctx) {
 			return
 		}
-
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			ctx.JSON(http.StatusInternalServerError, err.Error())
-			return
-		}
-
-		hasher := sha256.New()
-		signingSecret := getEnvOrDefault("SEATALK_SIGNING_SECRET", "")
-		if signingSecret == "" {
-			log.Printf("ERROR: SeaTalk signing secret not configured. Please set SEATALK_SIGNING_SECRET environment variable")
-			ctx.JSON(http.StatusForbidden, nil)
-			return
-		}
-		hasher.Write(append(body, []byte(signingSecret)...))
-		targetSignature := hex.EncodeToString(hasher.Sum(nil))
-
-		if signature != targetSignature {
-			ctx.JSON(http.StatusForbidden, nil)
-			return
-		}
-
-		r.Body = io.NopCloser(bytes.NewBuffer(body))
 		ctx.Next()
 	}
 }
