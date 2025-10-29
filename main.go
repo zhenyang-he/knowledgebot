@@ -80,8 +80,9 @@ type QAReminder struct {
 	LastSentTime   time.Time
 	Completed      bool
 	ReminderNumber int
-	Summary        string // Store Jira ticket summary for easy access
-	ButtonStatus   string // Track button click status: "completed", "nothing_to_update", or ""
+	Summary        string    // Store Jira ticket summary for easy access
+	ButtonStatus   string    // Track button click status: "completed", "nothing_to_update", or ""
+	UpdatedTime    time.Time // Store Jira ticket update time
 }
 
 // Group member info
@@ -331,7 +332,7 @@ func main() {
 		ctx.JSON(http.StatusOK, gin.H{
 			"status": "healthy",
 			"bot":    "knowledgebot",
-			"time":   time.Now().Format("2006-01-02 15:04:05"),
+			"time":   getSingaporeTime().Format("2006-01-02 15:04:05 GMT+8"),
 		})
 	}
 
@@ -386,7 +387,7 @@ func main() {
 			handleGroupMessage(ctx, reqSOP)
 			ctx.JSON(http.StatusOK, "Success")
 		case "user_enter_chatroom_with_bot":
-			log.Printf("DEBUG: User entered chatroom - %s", reqSOP.Event.DisplayName)
+			log.Printf("DEBUG: User entered chatroom - %s", getEmployeeDisplayName(reqSOP.Event))
 		default:
 			log.Printf("event %s not handled yet!", reqSOP.EventType)
 			ctx.JSON(http.StatusOK, "Success")
@@ -830,7 +831,8 @@ func sendMainQAReminder(qa GroupMember, ticketCount int) (string, error) {
 		SentTime:       time.Now(),
 		LastSentTime:   time.Now(),
 		Completed:      false,
-		ReminderNumber: 0, // Main reminder doesn't have a number
+		ReminderNumber: 0,                  // Main reminder doesn't have a number
+		UpdatedTime:    getSingaporeTime(), // Use current time for main reminder
 	}
 	reminderMutex.Unlock()
 
@@ -864,10 +866,14 @@ func sendTicketReminder(ticket JiraIssue, qa GroupMember, threadID string) error
 	reminderNumber := getNextReminderNumber(qa.Email)
 	title := fmt.Sprintf("📚 Knowledge Base Reminder %d", reminderNumber)
 
+	// Parse Jira update time
+	updatedTime := parseJiraUpdateTime(ticket.Fields.Updated)
+
 	description := fmt.Sprintf(`**Jira Ticket:** %s
+📅 **Completed Testing recently:** %s
 
 Click the appropriate button below when done:`,
-		jiraTicketWithTitle)
+		jiraTicketWithTitle, updatedTime.Format("02 Jan 2006"))
 
 	buttonID := ticket.Key
 	messageID, err := SendInteractiveMessageToGroupWithRetry(context.Background(), groupID, title, description, buttonID, threadID)
@@ -906,6 +912,7 @@ Click the appropriate button below when done:`,
 		ReminderNumber: reminderNumber,
 		Summary:        ticket.Fields.Summary, // Store the Jira ticket summary
 		ButtonStatus:   "",                    // Initialize as empty
+		UpdatedTime:    updatedTime,           // Store Jira update time
 	}
 	reminderMutex.Unlock()
 
@@ -1238,69 +1245,6 @@ func processFollowUpReminders() error {
 	return nil
 }
 
-func getJiraIssue(issueKey string) (*JiraIssue, error) {
-	resp, err := makeJiraRequest("GET", "/rest/api/2/issue/"+issueKey+"?fields=status,updated,summary", nil)
-	if err != nil {
-		log.Printf("ERROR: Failed to fetch Jira issue %s: %v", issueKey, err)
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		log.Printf("ERROR: Jira issue API error for %s: %d - %s", issueKey, resp.StatusCode, string(body))
-		return nil, fmt.Errorf("Jira API error: %d - %s", resp.StatusCode, string(body))
-	}
-
-	var issue JiraIssue
-	if err := json.NewDecoder(resp.Body).Decode(&issue); err != nil {
-		log.Printf("ERROR: Failed to decode Jira issue response for %s: %v", issueKey, err)
-		return nil, err
-	}
-
-	return &issue, nil
-}
-
-// This is used to determine if a ticket completed testing recently
-func recentlyCompletedTestingTime(issue *JiraIssue) (time.Time, error) {
-	// Use the updated time from the Jira ticket
-	if issue.Fields.Updated == "" {
-		return time.Time{}, fmt.Errorf("no updated time found")
-	}
-
-	// Parse the Jira timestamp
-	t, err := time.Parse("2006-01-02T15:04:05.999-0700", issue.Fields.Updated)
-	if err != nil {
-		// Try alternative format
-		t, err = time.Parse(time.RFC3339, issue.Fields.Updated)
-		if err != nil {
-			log.Printf("WARN: Failed to parse updated date %s: %v", issue.Fields.Updated, err)
-			return time.Time{}, err
-		}
-	}
-	return t, nil
-}
-
-// This is used to display when a ticket completed testing recently
-func getRecentlyCompletedTestingDate(issue *JiraIssue) string {
-	reviewTime, err := recentlyCompletedTestingTime(issue)
-	if err != nil {
-		// Fallback to current time if not found
-		return time.Now().Format("02 Jan 2006")
-	}
-	// Format as "02 Jan 2006"
-	return reviewTime.Format("02 Jan 2006")
-}
-
-// Format Jira ticket with title
-func formatJiraTicketWithTitle(issue *JiraIssue) string {
-	jiraURL := fmt.Sprintf("%s/browse/%s", jiraConfig.BaseURL, issue.Key)
-	if issue.Fields.Summary != "" {
-		return fmt.Sprintf("%s\n%s", jiraURL, issue.Fields.Summary)
-	}
-	return jiraURL
-}
-
 func sendFollowUpReminder(ticket JiraIssue, qa GroupMember) error {
 	// This function handles follow-up reminders only
 	// Main reminders are handled in the processQAReminders loop
@@ -1318,9 +1262,10 @@ func sendFollowUpReminder(ticket JiraIssue, qa GroupMember) error {
 
 	// Create description for follow-ups
 	description := fmt.Sprintf(`**Jira Ticket:** %s
+📅 **Completed Testing recently:** %s
 
 Click the appropriate button below when done:`,
-		jiraTicketWithTitle)
+		jiraTicketWithTitle, existingReminder.UpdatedTime.Format("02 Jan 2006"))
 
 	// Send as interactive thread reply using the original message ID as thread ID
 	buttonID := ticket.Key
@@ -1342,18 +1287,11 @@ Click the appropriate button below when done:`,
 
 // Send a status reminder with interactive buttons to a user privately
 func sendStatusReminderToUser(reminder *QAReminder, employeeCode string) error {
-	// Get ticket details
-	ticket, err := getJiraIssue(reminder.IssueKey)
-	if err != nil {
-		log.Printf("ERROR: Failed to get Jira issue %s for status: %v", reminder.IssueKey, err)
-		return err
-	}
+	// Use simple Jira URL without API call
+	jiraTicketWithTitle := fmt.Sprintf("%s/browse/%s", jiraConfig.BaseURL, reminder.IssueKey)
 
-	// Format Jira ticket with title
-	jiraTicketWithTitle := formatJiraTicketWithTitle(ticket)
-
-	// Get the date when ticket recently completed testing
-	recentlyCompletedTestingDate := getRecentlyCompletedTestingDate(ticket)
+	// Use stored Jira update time
+	recentlyCompletedTestingDate := reminder.UpdatedTime.Format("02 Jan 2006")
 
 	// Calculate how long ago the reminder was sent
 	timeSinceSent := time.Since(reminder.SentTime)
@@ -1798,15 +1736,8 @@ func handleKnowledgeBaseComplete(ctx *gin.Context, event Event, groupID, threadI
 		titlePrefix = "[Updated] "
 	}
 
-	// Get ticket details to format with title
-	ticket, err := getJiraIssue(ticketKey)
-	var jiraTicketWithTitle string
-	if err != nil {
-		// Fallback to just URL if we can't get ticket details
-		jiraTicketWithTitle = fmt.Sprintf("%s/browse/%s", jiraConfig.BaseURL, ticketKey)
-	} else {
-		jiraTicketWithTitle = formatJiraTicketWithTitle(ticket)
-	}
+	// Use simple Jira URL without API call
+	jiraTicketWithTitle := fmt.Sprintf("%s/browse/%s", jiraConfig.BaseURL, ticketKey)
 
 	// Send confirmation message with timestamps
 	confirmMsg := fmt.Sprintf(`✅ **%sKnowledge base is updated by %s**
@@ -1868,15 +1799,8 @@ func handleKnowledgeBaseCancel(ctx *gin.Context, event Event, groupID, threadID 
 		titlePrefix = "[Updated] "
 	}
 
-	// Get ticket details to format with title
-	ticket, err := getJiraIssue(ticketKey)
-	var jiraTicketWithTitle string
-	if err != nil {
-		// Fallback to just URL if we can't get ticket details
-		jiraTicketWithTitle = fmt.Sprintf("%s/browse/%s", jiraConfig.BaseURL, ticketKey)
-	} else {
-		jiraTicketWithTitle = formatJiraTicketWithTitle(ticket)
-	}
+	// Use simple Jira URL without API call
+	jiraTicketWithTitle := fmt.Sprintf("%s/browse/%s", jiraConfig.BaseURL, ticketKey)
 
 	// Send cancellation message
 	cancelMsg := fmt.Sprintf(`🚫 **%s%s acknowledged that knowledge base does not require update for this Jira ticket**
@@ -2072,6 +1996,15 @@ func formatDuration(d time.Duration) string {
 	return strings.Join(parts, "")
 }
 
+// Format Jira ticket with title
+func formatJiraTicketWithTitle(issue *JiraIssue) string {
+	jiraURL := fmt.Sprintf("%s/browse/%s", jiraConfig.BaseURL, issue.Key)
+	if issue.Fields.Summary != "" {
+		return fmt.Sprintf("%s\n%s", jiraURL, issue.Fields.Summary)
+	}
+	return jiraURL
+}
+
 func getCheerMessage(duration time.Duration) string {
 	hours := duration.Hours()
 	// Seed the random number generator with current time
@@ -2168,9 +2101,44 @@ func getEnvOrDefault(key, defaultValue string) string {
 	return value
 }
 
+// getSingaporeTime returns current time in Singapore timezone (GMT+8)
+func getSingaporeTime() time.Time {
+	location, err := time.LoadLocation("Asia/Singapore")
+	if err != nil {
+		// Fallback to UTC if Singapore timezone is not available
+		return time.Now().UTC()
+	}
+	return time.Now().In(location)
+}
+
+// parseJiraUpdateTime parses Jira update time string and converts to Singapore time
+func parseJiraUpdateTime(updatedStr string) time.Time {
+	if updatedStr == "" {
+		return getSingaporeTime() // Fallback to current time
+	}
+
+	// Parse the Jira timestamp
+	t, err := time.Parse("2006-01-02T15:04:05.999-0700", updatedStr)
+	if err != nil {
+		// Try alternative format
+		t, err = time.Parse(time.RFC3339, updatedStr)
+		if err != nil {
+			log.Printf("WARN: Failed to parse Jira update time %s: %v", updatedStr, err)
+			return getSingaporeTime() // Fallback to current time
+		}
+	}
+
+	// Convert to Singapore time
+	location, err := time.LoadLocation("Asia/Singapore")
+	if err != nil {
+		return t // Return as-is if Singapore timezone not available
+	}
+	return t.In(location)
+}
+
 // checkAndMarkDailyMessage checks if a message was already sent to a member today
 func checkAndMarkDailyMessage(email string) bool {
-	today := time.Now().Format("2006-01-02")
+	today := getSingaporeTime().Format("2006-01-02")
 
 	dailyMessageMutex.Lock()
 	defer dailyMessageMutex.Unlock()
@@ -2188,7 +2156,7 @@ func checkAndMarkDailyMessage(email string) bool {
 
 // cleanupOldDailyMessages removes old daily message records to prevent memory leaks
 func cleanupOldDailyMessages() {
-	today := time.Now().Format("2006-01-02")
+	today := getSingaporeTime().Format("2006-01-02")
 
 	dailyMessageMutex.Lock()
 	defer dailyMessageMutex.Unlock()
