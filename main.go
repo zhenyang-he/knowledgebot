@@ -337,12 +337,19 @@ func main() {
 
 	// Callback endpoint with conditional signature validation
 	r.POST("/callback", func(ctx *gin.Context) {
+		// Log the raw request body for debugging
+		body, _ := io.ReadAll(ctx.Request.Body)
+		log.Printf("DEBUG: Raw request body: %s", string(body))
+		ctx.Request.Body = io.NopCloser(bytes.NewReader(body))
+
 		var reqSOP SOPEventCallbackReq
 		if err := ctx.ShouldBindJSON(&reqSOP); err != nil {
+			log.Printf("ERROR: Failed to parse JSON: %v", err)
 			ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid JSON: " + err.Error()})
 			return
 		}
 		log.Printf("INFO: received event with event_type %s", reqSOP.EventType)
+		log.Printf("DEBUG: Parsed request: %+v", reqSOP)
 
 		// Handle verification requests without signature validation
 		if reqSOP.EventType == "event_verification" {
