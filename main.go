@@ -184,10 +184,18 @@ type SendMessageToUserResp struct {
 // Global variables
 var (
 	appAccessToken AppAccessToken
-	groupID        = "ODQ0ODgxNzk2Mjg5"                   // small group: OTIzMTMwNjE4MTI4
+	groupID        = "OTIzMTMwNjE4MTI4"                   // big group: ODQ0ODgxNzk2Mjg5, small group: OTIzMTMwNjE4MTI4
 	alertResponses = make(map[string]map[string][]string) // messageID -> employeeCode -> [button_types_pressed]
 	responseMutex  sync.RWMutex
 	jiraServiceURL string
+
+	// Event deduplication
+	processedEvents = make(map[string]bool)
+	eventMutex      sync.RWMutex
+
+	// Daily message deduplication per member
+	dailyMessagesSent = make(map[string]string) // employeeCode -> date
+	dailyMessageMutex sync.RWMutex
 
 	// Jira configuration (loaded from environment variables)
 	jiraConfig = JiraConfig{
@@ -344,6 +352,17 @@ func main() {
 		}
 		log.Printf("INFO: received event with event_type %s", reqSOP.EventType)
 
+		// Event deduplication - check if event already processed
+		eventMutex.Lock()
+		if processedEvents[reqSOP.EventID] {
+			log.Printf("INFO: Event %s already processed, skipping", reqSOP.EventID)
+			eventMutex.Unlock()
+			ctx.JSON(http.StatusOK, "Event already processed")
+			return
+		}
+		processedEvents[reqSOP.EventID] = true
+		eventMutex.Unlock()
+
 		// Handle verification requests without signature validation
 		if reqSOP.EventType == "event_verification" {
 			ctx.JSON(http.StatusOK, SOPEventVerificationResp{SeatalkChallenge: reqSOP.Event.SeatalkChallenge})
@@ -367,6 +386,7 @@ func main() {
 			handleGroupMessage(ctx, reqSOP)
 			ctx.JSON(http.StatusOK, "Success")
 		case "user_enter_chatroom_with_bot":
+			log.Printf("DEBUG: User entered chatroom - %s", reqSOP.Event.DisplayName)
 		default:
 			log.Printf("event %s not handled yet!", reqSOP.EventType)
 			ctx.JSON(http.StatusOK, "Success")
@@ -781,6 +801,11 @@ https://docs.google.com/spreadsheets/d/1QlBZniYwL5VqKW1KQxjTs4LEGqOJ8YWRFTLhX-MZ
 
 // Send main QA reminder (QA field only, no buttons)
 func sendMainQAReminder(qa GroupMember, ticketCount int) (string, error) {
+	// Check if daily message already sent to this member
+	if !checkAndMarkDailyMessage(qa.Email) {
+		return "", fmt.Errorf("daily message already sent to %s today", qa.Email)
+	}
+
 	title := "**📚 Knowledge Base Reminder**"
 	qaField := fmt.Sprintf("**QA:** <mention-tag target=\"seatalk://user?email=%s\"/> (cc: <mention-tag target=\"seatalk://user?email=shuang.xiao@shopee.com\"/>)", qa.Email)
 	// qaField := fmt.Sprintf("**QA:** <mention-tag target=\"seatalk://user?email=%s\"/>", qa.Email)
@@ -1034,6 +1059,8 @@ func startQAReminder() {
 	log.Println("INFO: Starting QA reminder scheduler")
 
 	for {
+		// Clean up old daily message records
+		cleanupOldDailyMessages()
 		// Load Singapore timezone (GMT+8)
 		location, err := time.LoadLocation("Asia/Singapore")
 		if err != nil {
@@ -2139,4 +2166,37 @@ func getEnvOrDefault(key, defaultValue string) string {
 		return defaultValue
 	}
 	return value
+}
+
+// checkAndMarkDailyMessage checks if a message was already sent to a member today
+func checkAndMarkDailyMessage(email string) bool {
+	today := time.Now().Format("2006-01-02")
+
+	dailyMessageMutex.Lock()
+	defer dailyMessageMutex.Unlock()
+
+	// Check if message already sent today
+	if lastSentDate, exists := dailyMessagesSent[email]; exists && lastSentDate == today {
+		log.Printf("INFO: Daily message already sent to %s today, skipping", email)
+		return false
+	}
+
+	// Mark message as sent today
+	dailyMessagesSent[email] = today
+	return true
+}
+
+// cleanupOldDailyMessages removes old daily message records to prevent memory leaks
+func cleanupOldDailyMessages() {
+	today := time.Now().Format("2006-01-02")
+
+	dailyMessageMutex.Lock()
+	defer dailyMessageMutex.Unlock()
+
+	// Remove records older than today
+	for email, date := range dailyMessagesSent {
+		if date != today {
+			delete(dailyMessagesSent, email)
+		}
+	}
 }
