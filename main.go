@@ -812,7 +812,7 @@ func sendMainQAReminder(qa GroupMember, ticketCount int, isSilent bool) (string,
 	if !isSilent {
 		qaField = fmt.Sprintf("**QA:** <mention-tag target=\"seatalk://user?email=%s\"/> (cc: <mention-tag target=\"seatalk://user?email=shuang.xiao@shopee.com\"/>)", qa.Email)
 	} else {
-		qaField = fmt.Sprintf("**QA:** %s\"/>", qa.DisplayName)
+		qaField = fmt.Sprintf("**QA:** %s", qa.DisplayName)
 	}
 	message := fmt.Sprintf("%s\n%s\n📊 **Total tickets to review:** %d", title, qaField, ticketCount)
 
@@ -1473,7 +1473,7 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 				confirmMsg = "🔇 **Silent Testing Mode** - No new reminders found. All eligible tickets already have reminders."
 				log.Printf("INFO: Silent Jira testing completed - no new reminders found")
 			} else {
-				confirmMsg = fmt.Sprintf("🔇 **Silent Testing Mode** - Found %d eligible ticket(s) that would have triggered reminders.\n\n**Note:** No messages were sent to the group.", sentCount)
+				confirmMsg = fmt.Sprintf("🔇 **Silent Testing Mode** - Found %d eligible ticket(s) that would have triggered reminders.\n\n**Note:** No notifications were sent to the group.", sentCount)
 				log.Printf("INFO: Silent Jira testing completed - %d eligible tickets found", sentCount)
 			}
 
