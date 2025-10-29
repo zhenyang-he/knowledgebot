@@ -1516,7 +1516,7 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 • "list" - View all completed and pending reminders for the team
 • "status" - View all your pending QA reminders with action buttons
 • "jira" - Manually trigger QA Jira queries check
-• "sjira" - Silent testing mode (check Jira without sending messages)
+• "sjira" - Silent testing mode (check Jira without sending notifications)
 
 **Group Messages:**
 • "@KnowledgeBot debug" - Show group ID and debug info
