@@ -64,6 +64,12 @@ type JiraSearchResult struct {
 	Issues []JiraIssue `json:"issues"`
 }
 
+// JiraServiceResponse represents the response from the Jira service
+type JiraServiceResponse struct {
+	Issues []JiraIssue `json:"issues"`
+	Error  string      `json:"error,omitempty"`
+}
+
 // QA Reminder tracking
 type QAReminder struct {
 	IssueKey       string
@@ -181,6 +187,7 @@ var (
 	groupID        = "ODQ0ODgxNzk2Mjg5"                   // small group: OTIzMTMwNjE4MTI4
 	alertResponses = make(map[string]map[string][]string) // messageID -> employeeCode -> [button_types_pressed]
 	responseMutex  sync.RWMutex
+	jiraServiceURL string
 
 	// Jira configuration (loaded from environment variables)
 	jiraConfig = JiraConfig{
@@ -297,6 +304,16 @@ func generateKnowledgeBaseList() string {
 }
 
 func main() {
+	// Initialize Jira service URL
+	jiraServiceURL = getEnvOrDefault("JIRA_SERVICE_URL", "")
+
+	// Log configuration
+	if jiraServiceURL != "" {
+		log.Println("INFO: Using Jira service, skipping VPN connection")
+	} else {
+		log.Println("INFO: Using direct Jira API (VPN may be required)")
+	}
+
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT)
 	r := gin.Default()
@@ -906,7 +923,54 @@ func makeJiraRequest(method, endpoint string, body []byte) (*http.Response, erro
 	return resp, nil
 }
 
+// searchJiraQATicketsViaService calls the Jira service instead of direct Jira API
+func searchJiraQATicketsViaService(qaEmail string) ([]JiraIssue, error) {
+	if jiraServiceURL == "" {
+		return nil, fmt.Errorf("JIRA_SERVICE_URL not configured")
+	}
+
+	// Prepare request body
+	requestBody := map[string]string{
+		"qa_email": qaEmail,
+	}
+
+	jsonData, err := json.Marshal(requestBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %v", err)
+	}
+
+	// Make HTTP request to Jira service
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Post(jiraServiceURL+"/search", "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to call Jira service: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("Jira service returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var serviceResp JiraServiceResponse
+	if err := json.NewDecoder(resp.Body).Decode(&serviceResp); err != nil {
+		return nil, fmt.Errorf("failed to decode Jira service response: %v", err)
+	}
+
+	if serviceResp.Error != "" {
+		return nil, fmt.Errorf("Jira service error: %s", serviceResp.Error)
+	}
+
+	return serviceResp.Issues, nil
+}
+
 func searchJiraQATickets(qaEmail string) ([]JiraIssue, error) {
+	// Use Jira service if configured, otherwise fall back to direct API
+	if jiraServiceURL != "" {
+		return searchJiraQATicketsViaService(qaEmail)
+	}
+
+	// Fallback to direct Jira API (for local development)
 	// Calculate the date range for "recently updated" (last 2 business days)
 	now := time.Now()
 	var startDate time.Time
