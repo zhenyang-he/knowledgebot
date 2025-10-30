@@ -1291,8 +1291,14 @@ Click the appropriate button below when done:`,
 
 // Send a status reminder with interactive buttons to a user privately
 func sendStatusReminderToUser(reminder *QAReminder, employeeCode string) error {
-	// Use simple Jira URL without API call
-	jiraTicketWithTitle := fmt.Sprintf("%s/browse/%s", jiraConfig.BaseURL, reminder.IssueKey)
+	// Create a temporary JiraIssue to reuse formatJiraTicketWithTitle
+	tempJiraIssue := JiraIssue{
+		Key: reminder.IssueKey,
+		Fields: JiraFields{
+			Summary: reminder.Summary,
+		},
+	}
+	jiraTicketWithTitle := formatJiraTicketWithTitle(&tempJiraIssue)
 
 	// Use stored Jira update time
 	recentlyCompletedTestingDate := reminder.UpdatedTime.Format("02 Jan 2006")
@@ -1301,7 +1307,6 @@ func sendStatusReminderToUser(reminder *QAReminder, employeeCode string) error {
 	timeSinceSent := time.Since(reminder.SentTime)
 	sentAgo := formatDuration(timeSinceSent)
 
-	// Create description
 	description := fmt.Sprintf(`🎫 **Jira Ticket:** %s
 📅 **Completed Testing recently:** %s
 ⏰ **Reminder Sent:** %s ago
