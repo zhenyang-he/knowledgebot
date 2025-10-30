@@ -1426,7 +1426,7 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 		}
 
 	case strings.Contains(messageLower, "status"):
-		log.Printf("INFO: Status command received from: %s (%s)", displayName, reqSOP.Event.Email)
+		log.Printf("INFO: Status command received from: %s", displayName)
 
 		// Get all incomplete reminders for this user
 		reminderMutex.RLock()
@@ -1791,7 +1791,6 @@ func handleKnowledgeBaseComplete(ctx *gin.Context, event Event, groupID, threadI
 	)
 
 	// Send response in thread if threadID is available, otherwise send as regular group message
-	log.Printf("DEBUG: Sending completion confirmation - threadID: %s, groupID: %s", threadID, groupID)
 	if threadID != "" {
 		if err := SendMessageToThreadWithRetry(ctx, confirmMsg, groupID, threadID); err != nil {
 			log.Printf("ERROR: Failed to send completion confirmation to thread: %v", err)
