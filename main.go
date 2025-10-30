@@ -1706,7 +1706,6 @@ func handleButtonClick(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 		}
 	}
 	reminderMutex.RUnlock()
-	log.Printf("DEBUG: Button click - threadID: %s, targetGroupID: %s", threadID, targetGroupID)
 
 	// Process the button click
 	var buttonStatus string
