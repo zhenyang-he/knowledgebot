@@ -80,9 +80,10 @@ type QAReminder struct {
 	LastSentTime   time.Time `json:"last_sent_time"`
 	Completed      bool      `json:"completed"`
 	ReminderNumber int       `json:"reminder_number"`
-	Summary        string    `json:"summary"`       // Store Jira ticket summary for easy access
-	ButtonStatus   string    `json:"button_status"` // Track button click status: "completed", "nothing_to_update", or ""
-	UpdatedTime    time.Time `json:"updated_time"`  // Store Jira ticket update time
+	Summary        string    `json:"summary"`        // Store Jira ticket summary for easy access
+	ButtonStatus   string    `json:"button_status"`  // Track button click status: "completed", "nothing_to_update", or ""
+	UpdatedTime    time.Time `json:"updated_time"`   // Store Jira ticket update time
+	CompletedTime  time.Time `json:"completed_time"` // Store when the button was actually clicked
 }
 
 // Group member info
@@ -267,7 +268,7 @@ func generateKnowledgeBaseList() string {
 			listMsg.WriteString(fmt.Sprintf("**By %s**\n", qaName))
 			for i, reminder := range completedByQA[qaName] {
 				jiraURL := fmt.Sprintf("%s/browse/%s", jiraConfig.BaseURL, reminder.IssueKey)
-				completedTime := reminder.LastSentTime.Format("Mon 3:04 PM")
+				completedTime := reminder.CompletedTime.Format("Mon 3:04 PM")
 
 				// Display button status
 				var statusText string
@@ -1730,6 +1731,7 @@ func markQAReminderCompleted(ticketKey, buttonStatus string) {
 	if reminder, exists := qaReminders[ticketKey]; exists {
 		reminder.Completed = true
 		reminder.ButtonStatus = buttonStatus
+		reminder.CompletedTime = getSingaporeTime() // Set the actual completion time
 
 		// Use the QA email from the reminder to get proper display name
 		displayName := formatEmailAsName(reminder.QAEmail)
