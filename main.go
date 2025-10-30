@@ -72,17 +72,17 @@ type JiraServiceResponse struct {
 
 // QA Reminder tracking
 type QAReminder struct {
-	IssueKey       string
-	QAName         string
-	QAEmail        string
-	MessageID      string
-	SentTime       time.Time
-	LastSentTime   time.Time
-	Completed      bool
-	ReminderNumber int
-	Summary        string    // Store Jira ticket summary for easy access
-	ButtonStatus   string    // Track button click status: "completed", "nothing_to_update", or ""
-	UpdatedTime    time.Time // Store Jira ticket update time
+	IssueKey       string    `json:"issue_key"`
+	QAName         string    `json:"qa_name"`
+	QAEmail        string    `json:"qa_email"`
+	MessageID      string    `json:"message_id"`
+	SentTime       time.Time `json:"sent_time"`
+	LastSentTime   time.Time `json:"last_sent_time"`
+	Completed      bool      `json:"completed"`
+	ReminderNumber int       `json:"reminder_number"`
+	Summary        string    `json:"summary"`       // Store Jira ticket summary for easy access
+	ButtonStatus   string    `json:"button_status"` // Track button click status: "completed", "nothing_to_update", or ""
+	UpdatedTime    time.Time `json:"updated_time"`  // Store Jira ticket update time
 }
 
 // Group member info
@@ -1715,10 +1715,10 @@ func handleButtonClick(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 	}
 
 	// Mark QA reminder as completed for both button types
-	markQAReminderCompleted(reqSOP.Event.EmployeeCode, ticketKey, buttonStatus)
+	markQAReminderCompleted(ticketKey, buttonStatus)
 }
 
-func markQAReminderCompleted(employeeCode, ticketKey, buttonStatus string) {
+func markQAReminderCompleted(ticketKey, buttonStatus string) {
 	reminderMutex.Lock()
 	defer reminderMutex.Unlock()
 
@@ -1726,7 +1726,9 @@ func markQAReminderCompleted(employeeCode, ticketKey, buttonStatus string) {
 	if reminder, exists := qaReminders[ticketKey]; exists {
 		reminder.Completed = true
 		reminder.ButtonStatus = buttonStatus
-		displayName := getEmployeeDisplayName(Event{EmployeeCode: employeeCode})
+
+		// Use the QA email from the reminder to get proper display name
+		displayName := formatEmailAsName(reminder.QAEmail)
 		log.Printf("INFO: QA reminder for %s marked as completed by %s with status: %s", ticketKey, displayName, buttonStatus)
 
 		// Decrease the reminder count for this QA
