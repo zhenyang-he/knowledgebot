@@ -78,7 +78,6 @@ type QAReminder struct {
 	MessageID      string    `json:"message_id"`
 	SentTime       time.Time `json:"sent_time"`
 	LastSentTime   time.Time `json:"last_sent_time"`
-	Completed      bool      `json:"completed"`
 	ReminderNumber int       `json:"reminder_number"`
 	Summary        string    `json:"summary"`        // Store Jira ticket summary for easy access
 	ButtonStatus   string    `json:"button_status"`  // Track button click status: "completed", "nothing_to_update", or ""
@@ -186,7 +185,7 @@ type SendMessageToUserResp struct {
 // Global variables
 var (
 	appAccessToken AppAccessToken
-	groupID        = "ODQ0ODgxNzk2Mjg5"                   // big group: ODQ0ODgxNzk2Mjg5, small group: OTIzMTMwNjE4MTI4
+	groupID        = "ODQ0ODgxNzk2Mjg5"                   // big group: ODQ0ODgxNzk2Mjg5, small group: OTIzMTMwNjE4MTI4, test group: NDY5MTA1MzQwMTI5
 	alertResponses = make(map[string]map[string][]string) // messageID -> employeeCode -> [button_types_pressed]
 	responseMutex  sync.RWMutex
 	jiraServiceURL string
@@ -228,7 +227,7 @@ func generateKnowledgeBaseList() string {
 			continue
 		}
 
-		if reminder.Completed {
+		if !reminder.CompletedTime.IsZero() {
 			completedReminders = append(completedReminders, reminder)
 		} else {
 			pendingReminders = append(pendingReminders, reminder)
@@ -766,6 +765,21 @@ func retryWithBackoff(operation func() error, maxRetries int) error {
 	return fmt.Errorf("operation failed after %d retries, last error: %v", maxRetries, lastErr)
 }
 
+func SendMessageToGroupWithRetry(ctx context.Context, message, groupID string) (string, error) {
+	var result string
+	var err error
+
+	retryErr := retryWithBackoff(func() error {
+		result, err = SendMessageToGroup(ctx, message, groupID)
+		return err
+	}, 3) // Retry up to 3 times
+
+	if retryErr != nil {
+		return "", retryErr
+	}
+	return result, nil
+}
+
 // Wrapper functions with retry logic
 func SendInteractiveMessageToGroupWithRetry(ctx context.Context, groupID, title, description, buttonID string, threadID ...string) (string, error) {
 	var result string
@@ -808,17 +822,19 @@ func sendMainQAReminder(qa GroupMember, ticketCount int, isSilent bool) (string,
 		return "", fmt.Errorf("daily message already sent to %s today", qa.Email)
 	}
 
-	title := "**📚 Knowledge Base Reminder**"
+	// Format date for title (e.g., "31 Oct 2025")
+	todayFormatted := getSingaporeTime().Format("02 Jan 2006")
+	title := fmt.Sprintf("**📚 [%s] Knowledge Base Reminder**", todayFormatted)
 	var qaField string
 	if !isSilent {
-		qaField = fmt.Sprintf("**QA:** <mention-tag target=\"seatalk://user?email=%s\"/> (cc: <mention-tag target=\"seatalk://user?email=shuang.xiao@shopee.com\"/>)", qa.Email)
+		qaField = fmt.Sprintf("**QA:** <mention-tag target=\"seatalk://user?email=%s\"/>", qa.Email)
 	} else {
 		qaField = fmt.Sprintf("**QA:** %s", qa.DisplayName)
 	}
 	message := fmt.Sprintf("%s\n%s\n📊 **Total tickets to review:** %d", title, qaField, ticketCount)
 
 	// Send as plain text message without buttons
-	messageID, err := SendMessageToGroup(context.Background(), message, groupID)
+	messageID, err := SendMessageToGroupWithRetry(context.Background(), message, groupID)
 	if err != nil {
 		return "", err
 	}
@@ -835,7 +851,6 @@ func sendMainQAReminder(qa GroupMember, ticketCount int, isSilent bool) (string,
 		MessageID:      messageID,
 		SentTime:       getSingaporeTime(),
 		LastSentTime:   getSingaporeTime(),
-		Completed:      false,
 		ReminderNumber: 0,                  // Main reminder doesn't have a number
 		UpdatedTime:    getSingaporeTime(), // Use current time for main reminder
 	}
@@ -913,7 +928,6 @@ Click the appropriate button below when done:`,
 		MessageID:      threadMessageID, // Store the main message ID for threading
 		SentTime:       now,
 		LastSentTime:   now,
-		Completed:      false,
 		ReminderNumber: reminderNumber,
 		Summary:        ticket.Fields.Summary, // Store the Jira ticket summary
 		ButtonStatus:   "",                    // Initialize as empty
@@ -1124,6 +1138,7 @@ func processQAReminders(isSilent bool) (int, error) {
 	members := getGroupMembers()
 	totalSent := 0
 	errorCount := 0
+	memberTicketCounts := make(map[string]int) // Track ticket counts per member
 
 	for _, member := range members {
 		// Search for Jira tickets assigned to this QA
@@ -1198,6 +1213,7 @@ func processQAReminders(isSilent bool) (int, error) {
 
 		if sentCount > 0 {
 			log.Printf("INFO: Sent %d new reminders to %s", sentCount, member.DisplayName)
+			memberTicketCounts[member.DisplayName] = sentCount
 		}
 		totalSent += sentCount
 	}
@@ -1205,6 +1221,37 @@ func processQAReminders(isSilent bool) (int, error) {
 	// If all members had errors, return an error
 	if errorCount > 0 && errorCount == len(members) {
 		return totalSent, fmt.Errorf("failed to query Jira for all team members")
+	}
+
+	// Send summary message at the end of the day (only if not silent and reminders were sent)
+	if totalSent > 0 {
+		today := getSingaporeTime().Format("02 Jan 2006 (Monday)")
+
+		// Build summary message with member breakdown
+		summaryMsg := fmt.Sprintf("**%s**\n", today)
+		summaryMsg += `<mention-tag target="seatalk://user?email=shuang.xiao@shopee.com"/>` + "\n"
+		summaryMsg += fmt.Sprintf("**%d** new reminders have been sent for your visibility today.", totalSent)
+
+		// Add per-member breakdown
+		if len(memberTicketCounts) > 0 {
+			// Sort member names for consistent ordering
+			memberNames := make([]string, 0, len(memberTicketCounts))
+			for name := range memberTicketCounts {
+				memberNames = append(memberNames, name)
+			}
+			sort.Strings(memberNames)
+
+			summaryMsg += "\n"
+			for _, name := range memberNames {
+				summaryMsg += fmt.Sprintf("%s - **%d** tickets\n", name, memberTicketCounts[name])
+			}
+			// Remove trailing newline
+			summaryMsg = strings.TrimSuffix(summaryMsg, "\n")
+		}
+
+		if _, err := SendMessageToGroupWithRetry(context.Background(), summaryMsg, groupID); err != nil {
+			log.Printf("ERROR: Failed to send daily summary message to boss: %v", err)
+		}
 	}
 
 	return totalSent, nil
@@ -1220,30 +1267,86 @@ func processFollowUpReminders() error {
 
 	now := getSingaporeTime()
 
+	// Collect eligible reminders for follow-up
+	eligibleReminders := make([]*QAReminder, 0)
 	for _, reminder := range reminders {
 		// Skip completed reminders
-		if reminder.Completed {
+		if !reminder.CompletedTime.IsZero() {
+			continue
+		}
+
+		// Skip "main_" keys (they're not actual Jira tickets)
+		if strings.HasPrefix(reminder.IssueKey, "main_") {
 			continue
 		}
 
 		// Check if 24 hours have passed since last reminder
 		if now.Sub(reminder.LastSentTime) >= 24*time.Hour {
-			log.Printf("INFO: Sending 24-hour follow-up reminder for %s to %s", reminder.IssueKey, reminder.QAName)
+			eligibleReminders = append(eligibleReminders, reminder)
+		}
+	}
 
-			// Create a minimal ticket object with just the key (status doesn't matter for follow-ups)
-			ticket := JiraIssue{
-				Key: reminder.IssueKey,
-			}
+	// Sort by reminder number before sending
+	sort.Slice(eligibleReminders, func(i, j int) bool {
+		return eligibleReminders[i].ReminderNumber < eligibleReminders[j].ReminderNumber
+	})
 
-			member := GroupMember{
-				DisplayName: reminder.QAName,
-				Email:       reminder.QAEmail,
-			}
+	// Send follow-up reminders in sorted order
+	totalSent := 0
+	memberTicketCounts := make(map[string]int) // Track ticket counts per member
+	for _, reminder := range eligibleReminders {
+		log.Printf("INFO: Sending 24-hour follow-up reminder for %s to %s (Reminder #%d)", reminder.IssueKey, reminder.QAName, reminder.ReminderNumber)
 
-			// Send follow-up reminder
-			if err := sendFollowUpReminder(ticket, member); err != nil {
-				log.Printf("ERROR: Failed to send follow-up reminder for %s: %v", reminder.IssueKey, err)
+		// Create ticket object with key and summary for follow-ups
+		ticket := JiraIssue{
+			Key: reminder.IssueKey,
+			Fields: JiraFields{
+				Summary: reminder.Summary,
+			},
+		}
+
+		member := GroupMember{
+			DisplayName: reminder.QAName,
+			Email:       reminder.QAEmail,
+		}
+
+		// Send follow-up reminder
+		if err := sendFollowUpReminder(ticket, member); err != nil {
+			log.Printf("ERROR: Failed to send follow-up reminder for %s: %v", reminder.IssueKey, err)
+		} else {
+			totalSent++
+			memberTicketCounts[reminder.QAName]++
+		}
+	}
+
+	// Send summary message at the end (only if reminders were sent)
+	if totalSent > 0 {
+		today := getSingaporeTime().Format("02 Jan 2006 (Monday)")
+
+		// Build summary message with member breakdown
+		summaryMsg := fmt.Sprintf("**%s**\n", today)
+		summaryMsg += `<mention-tag target="seatalk://user?email=shuang.xiao@shopee.com"/>` + "\n"
+		summaryMsg += fmt.Sprintf("**%d** number of follow up reminders have been sent today.", totalSent)
+
+		// Add per-member breakdown
+		if len(memberTicketCounts) > 0 {
+			// Sort member names for consistent ordering
+			memberNames := make([]string, 0, len(memberTicketCounts))
+			for name := range memberTicketCounts {
+				memberNames = append(memberNames, name)
 			}
+			sort.Strings(memberNames)
+
+			summaryMsg += "\n"
+			for _, name := range memberNames {
+				summaryMsg += fmt.Sprintf("%s - **%d** tickets\n", name, memberTicketCounts[name])
+			}
+			// Remove trailing newline
+			summaryMsg = strings.TrimSuffix(summaryMsg, "\n")
+		}
+
+		if _, err := SendMessageToGroupWithRetry(context.Background(), summaryMsg, groupID); err != nil {
+			log.Printf("ERROR: Failed to send follow-up summary message to boss: %v", err)
 		}
 	}
 
@@ -1265,12 +1368,13 @@ func sendFollowUpReminder(ticket JiraIssue, qa GroupMember) error {
 	// Create reminder message with appropriate prefix using the original reminder number
 	title := fmt.Sprintf("📚 [Follow-up Required] Knowledge Base Reminder %d", existingReminder.ReminderNumber)
 
-	// Create description for follow-ups
-	description := fmt.Sprintf(`**Jira Ticket:** %s
+	// Create description for follow-ups (same format as regular reminders, with mention tag)
+	description := fmt.Sprintf(`**QA:** <mention-tag target="seatalk://user?email=%s"/>
+**Jira Ticket:** %s
 📅 **Completed Testing recently:** %s
 
 Click the appropriate button below when done:`,
-		jiraTicketWithTitle, existingReminder.UpdatedTime.Format("02 Jan 2006"))
+		qa.Email, jiraTicketWithTitle, existingReminder.UpdatedTime.Format("02 Jan 2006"))
 
 	// Send as interactive thread reply using the original message ID as thread ID
 	buttonID := ticket.Key
@@ -1438,7 +1542,7 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 				continue
 			}
 
-			if !reminder.Completed && (reminder.QAEmail == reqSOP.Event.Email || strings.Contains(reqSOP.Event.Email, reminder.QAEmail)) {
+			if reminder.CompletedTime.IsZero() && (reminder.QAEmail == reqSOP.Event.Email || strings.Contains(reqSOP.Event.Email, reminder.QAEmail)) {
 				userReminders = append(userReminders, reminder)
 			}
 		}
@@ -1640,14 +1744,34 @@ func handleButtonClick(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 
 	if hasComplete && hasCancel {
 		responseMutex.Unlock()
-		log.Printf("INFO: User %s has already used both buttons for alert %s, blocking further clicks", reqSOP.Event.EmployeeCode, messageID)
+		displayName := getEmployeeDisplayName(reqSOP.Event)
+		log.Printf("INFO: User %s has already used both buttons for alert %s, blocking further clicks", displayName, ticketKey)
+
+		// Send private message to inform the user
+		msg := fmt.Sprintf("⚠️ You have already responded to this reminder for ticket %s with both actions (Complete and Nothing to update). No further actions are possible.", ticketKey)
+		if err := SendMessageToUser(ctx, msg, reqSOP.Event.EmployeeCode); err != nil {
+			log.Printf("ERROR: Failed to send blocked button click message to user: %v", err)
+		}
 		return
 	}
 
 	// Check if user is clicking the same button again
 	if contains(userResponses, buttonType) {
 		responseMutex.Unlock()
-		log.Printf("INFO: User %s already clicked %s button for alert %s, ignoring duplicate", reqSOP.Event.EmployeeCode, buttonType, messageID)
+		displayName := getEmployeeDisplayName(reqSOP.Event)
+		log.Printf("INFO: User %s already clicked %s button for alert %s, ignoring duplicate", displayName, buttonType, ticketKey)
+
+		// Send private message to inform the user
+		var actionText string
+		if buttonType == "complete" {
+			actionText = "Complete"
+		} else {
+			actionText = "Nothing to update"
+		}
+		msg := fmt.Sprintf("ℹ️ You have already clicked the \"%s\" button for ticket %s. No further action is needed.", actionText, ticketKey)
+		if err := SendMessageToUser(ctx, msg, reqSOP.Event.EmployeeCode); err != nil {
+			log.Printf("ERROR: Failed to send duplicate button click message to user: %v", err)
+		}
 		return
 	}
 	responseMutex.Unlock()
@@ -1723,27 +1847,6 @@ func handleButtonClick(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 	markQAReminderCompleted(ticketKey, buttonStatus)
 }
 
-func markQAReminderCompleted(ticketKey, buttonStatus string) {
-	reminderMutex.Lock()
-	defer reminderMutex.Unlock()
-
-	// Find the QA reminder by ticket key
-	if reminder, exists := qaReminders[ticketKey]; exists {
-		reminder.Completed = true
-		reminder.ButtonStatus = buttonStatus
-		reminder.CompletedTime = getSingaporeTime() // Set the actual completion time
-
-		// Use the QA email from the reminder to get proper display name
-		displayName := formatEmailAsName(reminder.QAEmail)
-		log.Printf("INFO: QA reminder for %s marked as completed by %s with status: %s", ticketKey, displayName, buttonStatus)
-
-		// Decrease the reminder count for this QA
-		decreaseReminderCount(reminder.QAEmail)
-	} else {
-		log.Printf("WARN: No reminder found for ticket %s when trying to mark as completed", ticketKey)
-	}
-}
-
 func handleKnowledgeBaseComplete(ctx *gin.Context, event Event, groupID, threadID string, isSecondButton bool, ticketKey string) {
 	displayName := getEmployeeDisplayName(event)
 	completedTime := getSingaporeTime()
@@ -1797,9 +1900,12 @@ func handleKnowledgeBaseComplete(ctx *gin.Context, event Event, groupID, threadI
 		if err := SendMessageToThreadWithRetry(ctx, confirmMsg, groupID, threadID); err != nil {
 			log.Printf("ERROR: Failed to send completion confirmation to thread: %v", err)
 		}
-	} else {
-		if _, err := SendMessageToGroup(ctx, confirmMsg, groupID); err != nil {
-			log.Printf("ERROR: Failed to send completion confirmation: %v", err)
+	}
+
+	// If clicked from private message, also send confirmation to user privately
+	if event.GroupID == "" {
+		if err := SendMessageToUser(ctx, confirmMsg, event.EmployeeCode); err != nil {
+			log.Printf("ERROR: Failed to send completion confirmation to user privately: %v", err)
 		}
 	}
 }
@@ -1854,21 +1960,34 @@ func handleKnowledgeBaseCancel(ctx *gin.Context, event Event, groupID, threadID 
 		if err := SendMessageToThreadWithRetry(ctx, cancelMsg, groupID, threadID); err != nil {
 			log.Printf("ERROR: Failed to send cancellation confirmation to thread: %v", err)
 		}
-	} else {
-		if _, err := SendMessageToGroup(ctx, cancelMsg, groupID); err != nil {
-			log.Printf("ERROR: Failed to send cancellation confirmation: %v", err)
+	}
+
+	// If clicked from private message, also send confirmation to user privately
+	if event.GroupID == "" {
+		if err := SendMessageToUser(ctx, cancelMsg, event.EmployeeCode); err != nil {
+			log.Printf("ERROR: Failed to send cancellation confirmation to user privately: %v", err)
 		}
 	}
 }
 
-// Helper function to check if slice contains a string
-func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
+func markQAReminderCompleted(ticketKey, buttonStatus string) {
+	reminderMutex.Lock()
+	defer reminderMutex.Unlock()
+
+	// Find the QA reminder by ticket key
+	if reminder, exists := qaReminders[ticketKey]; exists {
+		reminder.ButtonStatus = buttonStatus
+		reminder.CompletedTime = getSingaporeTime() // Set the actual completion time
+
+		// Use the QA email from the reminder to get proper display name
+		displayName := formatEmailAsName(reminder.QAEmail)
+		log.Printf("INFO: QA reminder for %s marked as completed by %s with status: %s", ticketKey, displayName, buttonStatus)
+
+		// Decrease the reminder count for this QA
+		decreaseReminderCount(reminder.QAEmail)
+	} else {
+		log.Printf("WARN: No reminder found for ticket %s when trying to mark as completed", ticketKey)
 	}
-	return false
 }
 
 // Start cleanup scheduler to remove completed reminders every 2 weeks on Monday at 12am
@@ -1950,7 +2069,7 @@ func cleanupOldReminders() error {
 
 	removedCount := 0
 	for issueKey, reminder := range qaReminders {
-		if reminder.Completed && reminder.LastSentTime.Before(cutoffTime) {
+		if !reminder.CompletedTime.IsZero() && reminder.LastSentTime.Before(cutoffTime) {
 			delete(qaReminders, issueKey)
 			removedCount++
 			log.Printf("INFO: Removed completed reminder for %s (completed on %s)", issueKey, reminder.LastSentTime.Format("2006-01-02 15:04"))
@@ -2132,6 +2251,16 @@ func getEnvOrDefault(key, defaultValue string) string {
 		return defaultValue
 	}
 	return value
+}
+
+// Helper function to check if slice contains a string
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
 }
 
 // getSingaporeTime returns current time in Singapore timezone (GMT+8)
