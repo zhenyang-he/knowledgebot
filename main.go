@@ -1408,20 +1408,19 @@ func sendStatusReminderToUser(reminder *QAReminder, employeeCode string) error {
 	// Use stored Jira update time
 	recentlyCompletedTestingDate := reminder.UpdatedTime.Format("02 Jan 2006")
 
-	// Calculate how long ago the reminder was sent
-	timeSinceSent := time.Since(reminder.SentTime)
+	// Calculate how long ago the reminder was sent (use LastSentTime for follow-ups)
+	timeSinceSent := time.Since(reminder.LastSentTime)
 	sentAgo := formatDuration(timeSinceSent)
 
-	description := fmt.Sprintf(`🎫 **Jira Ticket:** %s
+	description := fmt.Sprintf(`**Jira Ticket:** %s
 📅 **Completed Testing recently:** %s
-⏰ **Reminder Sent:** %s ago
+⏰ **Latest reminder Sent:** %s ago
 
-Please review and update the knowledge base accordingly.
+Click the appropriate button below when done:`,
+		jiraTicketWithTitle, recentlyCompletedTestingDate, sentAgo)
 
-Click the appropriate button when done:`, jiraTicketWithTitle, recentlyCompletedTestingDate, sentAgo)
-
-	// Create interactive message with buttons
-	title := fmt.Sprintf("📚 Knowledge Base Reminder: %s", reminder.IssueKey)
+	// Create interactive message with buttons (include reminder number to match thread format)
+	title := fmt.Sprintf("📚 Knowledge Base Reminder %d", reminder.ReminderNumber)
 	// Use ticket key only as button ID (consistent with group reminders)
 	buttonID := reminder.IssueKey
 
