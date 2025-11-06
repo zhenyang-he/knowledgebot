@@ -1609,6 +1609,11 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 				log.Printf("ERROR: Failed to send no reminders message: %v", err)
 			}
 		} else {
+			// Sort reminders by reminder number before sending
+			sort.Slice(userReminders, func(i, j int) bool {
+				return userReminders[i].ReminderNumber < userReminders[j].ReminderNumber
+			})
+
 			// Send interactive message for each reminder
 			for _, reminder := range userReminders {
 				if err := sendStatusReminderToUser(reminder, reqSOP.Event.EmployeeCode); err != nil {
