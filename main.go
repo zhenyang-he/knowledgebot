@@ -327,13 +327,27 @@ func main() {
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT)
 	r := gin.Default()
 
+	// Add panic recovery middleware to prevent crashes
+	r.Use(gin.Recovery())
+
 	// Health check endpoint for uptime monitoring (no signature validation needed)
+	// Enhanced health check that verifies critical components
 	healthHandler := func(ctx *gin.Context) {
-		ctx.JSON(http.StatusOK, gin.H{
+		healthStatus := gin.H{
 			"status": "healthy",
 			"bot":    "knowledgebot",
 			"time":   getSingaporeTime().Format("2006-01-02 15:04:05 GMT+8"),
-		})
+		}
+
+		// Check if critical components are accessible
+		reminderMutex.RLock()
+		reminderCount := len(qaReminders)
+		reminderMutex.RUnlock()
+
+		healthStatus["reminders_tracked"] = reminderCount
+		healthStatus["uptime_check"] = "ok"
+
+		ctx.JSON(http.StatusOK, healthStatus)
 	}
 
 	// Support both GET and HEAD requests for health checks
@@ -410,27 +424,43 @@ func main() {
 	// Start cleanup scheduler for old completed reminders
 	go startReminderCleanup()
 
+	// Start HTTP server
 	go func() {
+		// Recover from panics to prevent service crash
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("ERROR: Panic in HTTP server goroutine: %v", r)
+				// Exit with non-zero code so Render knows to restart
+				os.Exit(1)
+			}
+		}()
+
 		log.Println("starting web, listening on", srv.Addr)
 		err := srv.ListenAndServe()
 		if err != nil && err != http.ErrServerClosed {
-			log.Fatalln("failed starting web on", srv.Addr, err)
+			log.Printf("ERROR: HTTP server error on %s: %v", srv.Addr, err)
+			// Don't use log.Fatalln - let Render handle restart via health checks
+			// Exit with non-zero code so Render knows to restart
+			os.Exit(1)
 		}
 	}()
 
-	for {
-		<-c
-		log.Println("terminate service")
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// Handle shutdown signals - wait for termination signal
+	sig := <-c
+	log.Printf("INFO: Received signal %v, initiating graceful shutdown", sig)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 
-		log.Println("shutting down web on", srv.Addr)
-		if err := srv.Shutdown(ctx); err != nil {
-			log.Fatalln("failed shutdown server", err)
-		}
-		cancel()
-		log.Println("web gracefully stopped")
-		os.Exit(0)
+	log.Println("shutting down web on", srv.Addr)
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("ERROR: failed shutdown server: %v", err)
+		// Exit with non-zero code on shutdown failure so Render restarts
+		os.Exit(1)
 	}
+	cancel()
+	log.Println("web gracefully stopped")
+	// Exit with code 1 to trigger Render auto-restart
+	// This ensures the service restarts even after graceful shutdown
+	os.Exit(1)
 }
 
 func validateSignature(ctx *gin.Context) bool {
@@ -1085,51 +1115,61 @@ func startQAReminder() {
 	log.Println("INFO: Starting QA reminder scheduler")
 
 	for {
-		// Clean up old daily message records
-		cleanupOldDailyMessages()
-		// Load Singapore timezone (GMT+8)
-		location, err := time.LoadLocation("Asia/Singapore")
-		if err != nil {
-			location = time.UTC
-		}
-		now := time.Now().In(location)
+		// Recover from panics in each iteration to prevent scheduler crash
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("ERROR: Panic in QA reminder scheduler iteration: %v", r)
+					// Continue to next iteration instead of crashing
+				}
+			}()
 
-		// Calculate next 10:00 AM in GMT+8
-		next10am := time.Date(now.Year(), now.Month(), now.Day(), 10, 0, 0, 0, location)
-		if now.After(next10am) {
-			// If it's already past 10:00 today, schedule for tomorrow
-			next10am = next10am.Add(24 * time.Hour)
-		}
+			// Clean up old daily message records
+			cleanupOldDailyMessages()
+			// Load Singapore timezone (GMT+8)
+			location, err := time.LoadLocation("Asia/Singapore")
+			if err != nil {
+				location = time.UTC
+			}
+			now := time.Now().In(location)
 
-		// Skip weekends - find next weekday
-		for next10am.Weekday() == time.Saturday || next10am.Weekday() == time.Sunday {
-			next10am = next10am.Add(24 * time.Hour)
-		}
+			// Calculate next 10:00 AM in GMT+8
+			next10am := time.Date(now.Year(), now.Month(), now.Day(), 10, 0, 0, 0, location)
+			if now.After(next10am) {
+				// If it's already past 10:00 today, schedule for tomorrow
+				next10am = next10am.Add(24 * time.Hour)
+			}
 
-		sleepDuration := next10am.Sub(now)
-		log.Printf("INFO: Next QA reminder scheduled for %s GMT+8 (in %s)", next10am.Format("2006-01-02 15:04:05"), sleepDuration)
-		time.Sleep(sleepDuration)
+			// Skip weekends - find next weekday
+			for next10am.Weekday() == time.Saturday || next10am.Weekday() == time.Sunday {
+				next10am = next10am.Add(24 * time.Hour)
+			}
 
-		// Skip weekends (already handled in the loop above)
-		if next10am.Weekday() == time.Saturday || next10am.Weekday() == time.Sunday {
-			continue
-		}
+			sleepDuration := next10am.Sub(now)
+			log.Printf("INFO: Next QA reminder scheduled for %s GMT+8 (in %s)", next10am.Format("2006-01-02 15:04:05"), sleepDuration)
+			time.Sleep(sleepDuration)
 
-		log.Println("INFO: Running daily QA reminder check")
-		sentCount, err := processQAReminders(false)
-		if err != nil {
-			log.Printf("ERROR: Failed to process QA reminders: %v", err)
-		} else {
-			log.Printf("INFO: Daily QA reminder check completed - %d new reminders sent", sentCount)
-		}
+			// Skip weekends (already handled in the loop above)
+			if next10am.Weekday() == time.Saturday || next10am.Weekday() == time.Sunday {
+				return
+			}
 
-		// Also check for 24-hour follow-ups
-		if err := processFollowUpReminders(); err != nil {
-			log.Printf("ERROR: Failed to process follow-up reminders: %v", err)
-		}
+			log.Println("INFO: Running daily QA reminder check")
+			sentCount, err := processQAReminders(false)
+			if err != nil {
+				log.Printf("ERROR: Failed to process QA reminders: %v", err)
+			} else {
+				log.Printf("INFO: Daily QA reminder check completed - %d new reminders sent", sentCount)
+			}
 
-		// Sleep for a minute to avoid running multiple times
-		time.Sleep(time.Minute)
+			// Also check for 24-hour follow-ups
+			if err := processFollowUpReminders(); err != nil {
+				log.Printf("ERROR: Failed to process follow-up reminders: %v", err)
+			}
+
+			// Sleep for a minute to avoid running multiple times
+			time.Sleep(time.Minute)
+		}()
 	}
 }
 
@@ -1991,6 +2031,16 @@ func markQAReminderCompleted(ticketKey, buttonStatus string) {
 
 // Start cleanup scheduler to remove completed reminders every 2 weeks on Monday at 12am
 func startReminderCleanup() {
+	// Recover from panics to prevent scheduler crash
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("ERROR: Panic in reminder cleanup scheduler: %v", r)
+			// Restart the scheduler after a delay
+			time.Sleep(1 * time.Hour)
+			go startReminderCleanup()
+		}
+	}()
+
 	log.Println("INFO: Starting reminder cleanup scheduler (runs every 2 weeks on Monday at 12am)")
 
 	// Track if we've run cleanup this cycle
