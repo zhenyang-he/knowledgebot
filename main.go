@@ -325,7 +325,27 @@ func main() {
 
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT)
-	r := gin.Default()
+	r := gin.New()
+
+	// Custom logger that skips health check endpoints
+	r.Use(gin.LoggerWithFormatter(func(param gin.LogFormatterParams) string {
+		// Skip logging for health check endpoints
+		if param.Path == "/health" || param.Path == "/" {
+			return ""
+		}
+		// Use standard Gin logger format
+		return fmt.Sprintf("%s - [%s] \"%s %s %s %d %s \"%s\" %s\"\n",
+			param.ClientIP,
+			param.TimeStamp.Format("02/Jan/2006:15:04:05 -0700"),
+			param.Method,
+			param.Path,
+			param.Request.Proto,
+			param.StatusCode,
+			param.Latency,
+			param.Request.UserAgent(),
+			param.ErrorMessage,
+		)
+	}))
 
 	// Add panic recovery middleware to prevent crashes
 	r.Use(gin.Recovery())
@@ -458,9 +478,7 @@ func main() {
 	}
 	cancel()
 	log.Println("web gracefully stopped")
-	// Exit with code 1 to trigger Render auto-restart
-	// This ensures the service restarts even after graceful shutdown
-	os.Exit(1)
+	os.Exit(0)
 }
 
 func validateSignature(ctx *gin.Context) bool {
