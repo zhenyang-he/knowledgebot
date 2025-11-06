@@ -327,23 +327,21 @@ func main() {
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT)
 	r := gin.New()
 
-	// Custom logger that skips health check endpoints
+	// Custom logger that skips health check and callback endpoints
 	r.Use(gin.LoggerWithFormatter(func(param gin.LogFormatterParams) string {
-		// Skip logging for health check endpoints
-		if param.Path == "/health" || param.Path == "/" {
+		// Skip logging for GET /health, root path, and callback endpoints (frequent automated requests)
+		// Keep HEAD /health logs for monitoring visibility
+		if param.Path == "/callback" || param.Path == "/" || (param.Path == "/health" && param.Method == "GET") {
 			return ""
 		}
-		// Use standard Gin logger format
-		return fmt.Sprintf("%s - [%s] \"%s %s %s %d %s \"%s\" %s\"\n",
+		// Simplified format: IP, Method, Path, Status, Latency, UserAgent
+		return fmt.Sprintf("%s %s %s %d %s %s\n",
 			param.ClientIP,
-			param.TimeStamp.Format("02/Jan/2006:15:04:05 -0700"),
 			param.Method,
 			param.Path,
-			param.Request.Proto,
 			param.StatusCode,
 			param.Latency,
 			param.Request.UserAgent(),
-			param.ErrorMessage,
 		)
 	}))
 
