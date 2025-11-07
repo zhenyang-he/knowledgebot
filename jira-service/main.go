@@ -32,7 +32,9 @@ type JiraIssue struct {
 		IssueType struct {
 			Name string `json:"name"`
 		} `json:"issuetype"`
-		Updated string `json:"updated"`
+		Updated  string     `json:"updated"`
+		Parent   *JiraIssue `json:"parent,omitempty"`            // Parent Epic (if ticket is linked to an Epic)
+		EpicLink string     `json:"customfield_10001,omitempty"` // Epic Link custom field
 	} `json:"fields"`
 }
 
@@ -149,19 +151,25 @@ func searchJiraQATickets(qaEmail string) ([]JiraIssue, error) {
 	// URL encode the JQL query
 	encodedJQL := url.QueryEscape(jql)
 
-	endpoint := fmt.Sprintf("/rest/api/2/search?jql=%s&maxResults=50&fields=status,updated,summary,issuetype", encodedJQL)
+	endpoint := fmt.Sprintf("/rest/api/2/search?jql=%s&maxResults=50&fields=status,updated,summary,issuetype,parent,customfield_10001", encodedJQL)
 	resp, err := makeJiraRequest("GET", endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
+	// Read the response body
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("ERROR: Failed to read Jira API response body: %v", err)
+		return nil, err
+	}
+
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
 		contentType := resp.Header.Get("Content-Type")
 
 		if contentType == "application/json" {
-			log.Printf("ERROR: Jira API returned %d with JSON error: %s", resp.StatusCode, string(body))
+			log.Printf("ERROR: Jira API returned %d with JSON error: %s", resp.StatusCode, string(bodyBytes))
 		} else {
 			log.Printf("ERROR: Jira API returned %d with non-JSON response (Content-Type: %s)", resp.StatusCode, contentType)
 		}
@@ -169,7 +177,8 @@ func searchJiraQATickets(qaEmail string) ([]JiraIssue, error) {
 	}
 
 	var result JiraSearchResult
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(bodyBytes, &result); err != nil {
+		log.Printf("ERROR: Failed to decode Jira search response: %v", err)
 		return nil, err
 	}
 
