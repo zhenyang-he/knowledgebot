@@ -50,7 +50,8 @@ type JiraFields struct {
 	Updated   string        `json:"updated"`
 	Summary   string        `json:"summary"`
 	Issuetype JiraIssuetype `json:"issuetype"`
-	EpicLink  string        `json:"customfield_10011,omitempty"` // Epic Link field (common Jira custom field ID)
+	Parent    *JiraIssue    `json:"parent,omitempty"`            // Parent Epic (if ticket is linked to an Epic)
+	EpicLink  string        `json:"customfield_10001,omitempty"` // Epic Link custom field
 }
 
 type JiraStatus struct {
@@ -81,6 +82,7 @@ type QAReminder struct {
 	LastSentTime   time.Time `json:"last_sent_time"`
 	ReminderNumber int       `json:"reminder_number"`
 	Summary        string    `json:"summary"`        // Store Jira ticket summary for easy access
+	IssueType      string    `json:"issue_type"`     // Store Jira ticket type (Epic, Task, Bug, etc.)
 	ButtonStatus   string    `json:"button_status"`  // Track button click status: "completed", "nothing_to_update", or ""
 	UpdatedTime    time.Time `json:"updated_time"`   // Store Jira ticket update time
 	CompletedTime  time.Time `json:"completed_time"` // Store when the button was actually clicked
@@ -936,11 +938,12 @@ func sendTicketReminder(ticket JiraIssue, qa GroupMember, threadID string) error
 	// Parse Jira update time
 	updatedTime := parseJiraUpdateTime(ticket.Fields.Updated)
 
-	description := fmt.Sprintf(`**Jira Ticket:** %s
+	ticketType := ticket.Fields.Issuetype.Name
+	description := fmt.Sprintf(`**Jira (%s):** %s
 📅 **Completed Testing recently:** %s
 
-Click the appropriate button below when done:`,
-		jiraTicketWithTitle, updatedTime.Format("02 Jan 2006"))
+Click the appropriate button below:`,
+		ticketType, jiraTicketWithTitle, updatedTime.Format("02 Jan 2006"))
 
 	buttonID := ticket.Key
 	messageID, err := SendInteractiveMessageToGroupWithRetry(context.Background(), groupID, title, description, buttonID, threadID)
@@ -976,9 +979,10 @@ Click the appropriate button below when done:`,
 		SentTime:       now,
 		LastSentTime:   now,
 		ReminderNumber: reminderNumber,
-		Summary:        ticket.Fields.Summary, // Store the Jira ticket summary
-		ButtonStatus:   "",                    // Initialize as empty
-		UpdatedTime:    updatedTime,           // Store Jira update time
+		Summary:        ticket.Fields.Summary,        // Store the Jira ticket summary
+		IssueType:      ticket.Fields.Issuetype.Name, // Store the Jira ticket type
+		ButtonStatus:   "",                           // Initialize as empty
+		UpdatedTime:    updatedTime,                  // Store Jira update time
 	}
 	reminderMutex.Unlock()
 
@@ -1097,7 +1101,7 @@ func searchJiraQATickets(qaEmail string) ([]JiraIssue, error) {
 	// URL encode the JQL query
 	encodedJQL := url.QueryEscape(jql)
 
-	endpoint := fmt.Sprintf("/rest/api/2/search?jql=%s&maxResults=50&fields=status,updated,summary,issuetype,customfield_10011", encodedJQL)
+	endpoint := fmt.Sprintf("/rest/api/2/search?jql=%s&maxResults=50&fields=status,updated,summary,issuetype,customfield_10001", encodedJQL)
 	resp, err := makeJiraRequest("GET", endpoint, nil)
 	if err != nil {
 		log.Printf("ERROR: Failed to search Jira tickets for %s: %v", qaEmail, err)
@@ -1105,13 +1109,18 @@ func searchJiraQATickets(qaEmail string) ([]JiraIssue, error) {
 	}
 	defer resp.Body.Close()
 
+	// Read the response body
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("ERROR: Failed to read Jira API response body: %v", err)
+		return nil, err
+	}
+
 	if resp.StatusCode != http.StatusOK {
-		// Check if response is JSON or HTML
-		body, _ := io.ReadAll(resp.Body)
 		contentType := resp.Header.Get("Content-Type")
 
 		if strings.Contains(contentType, "application/json") {
-			log.Printf("ERROR: Jira API returned %d with JSON error: %s", resp.StatusCode, string(body))
+			log.Printf("ERROR: Jira API returned %d with JSON error: %s", resp.StatusCode, string(bodyBytes))
 		} else {
 			log.Printf("ERROR: Jira API returned %d with non-JSON response (Content-Type: %s). This suggests wrong endpoint or authentication issue.", resp.StatusCode, contentType)
 			log.Printf("ERROR: Response body type: %s", contentType)
@@ -1120,7 +1129,7 @@ func searchJiraQATickets(qaEmail string) ([]JiraIssue, error) {
 	}
 
 	var result JiraSearchResult
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(bodyBytes, &result); err != nil {
 		log.Printf("ERROR: Failed to decode Jira search response for %s: %v", qaEmail, err)
 		return nil, err
 	}
@@ -1205,6 +1214,7 @@ func processQAReminders(isSilent bool) (int, error) {
 			errorCount++
 			continue
 		}
+		log.Printf("INFO: Processing %d pre-filtered tickets for QA %s", len(tickets), member.Email)
 
 		// Tickets are already filtered by JQL query (status + date), so we only need to check for existing reminders
 		var eligibleTickets []JiraIssue
@@ -1212,9 +1222,8 @@ func processQAReminders(isSilent bool) (int, error) {
 		existingReminders := []string{} // Tickets that already have reminders
 		for _, ticket := range tickets {
 			reminderKey := ticket.Key
-			log.Printf("DEBUG: Checking ticket %s (Status: %s, Updated: %s)", ticket.Key, ticket.Fields.Status.Name, ticket.Fields.Updated)
 
-			// Skip tickets with Epic Links
+			// Skip tickets with Epic Link (via EpicLink custom field)
 			if ticket.Fields.EpicLink != "" {
 				skippedTickets = append(skippedTickets, ticket.Key)
 				continue
@@ -1264,6 +1273,7 @@ func processQAReminders(isSilent bool) (int, error) {
 
 		// Send individual ticket reminders as thread replies
 		sentCount := 0
+		sentTickets := []string{}
 		failedTickets := []JiraIssue{}
 		for _, ticket := range eligibleTickets {
 			if err := sendTicketReminder(ticket, member, mainMessageID); err != nil {
@@ -1271,6 +1281,7 @@ func processQAReminders(isSilent bool) (int, error) {
 				failedTickets = append(failedTickets, ticket)
 			} else {
 				sentCount++
+				sentTickets = append(sentTickets, ticket.Key)
 			}
 		}
 
@@ -1288,7 +1299,8 @@ func processQAReminders(isSilent bool) (int, error) {
 		}
 
 		if sentCount > 0 {
-			log.Printf("INFO: Sent %d new reminders to %s", sentCount, member.DisplayName)
+			ticketsList := strings.Join(sentTickets, ", ")
+			log.Printf("INFO: Sent %d new reminders to %s: %s", sentCount, member.DisplayName, ticketsList)
 			memberTicketCounts[member.DisplayName] = sentCount
 		}
 		totalSent += sentCount
@@ -1304,9 +1316,10 @@ func processQAReminders(isSilent bool) (int, error) {
 		today := getSingaporeTime().Format("02 Jan 2006 (Monday)")
 
 		// Build summary message with member breakdown
-		summaryMsg := fmt.Sprintf("**%s**\n", today)
+		summaryMsg := fmt.Sprintf("📚 **%s**\n", today)
+		summaryMsg += "🌅 Good morning! "
 		summaryMsg += `<mention-tag target="seatalk://user?email=shuang.xiao@shopee.com"/>` + "\n"
-		summaryMsg += fmt.Sprintf("**%d** new reminders have been sent for your visibility today.", totalSent)
+		summaryMsg += fmt.Sprintf("**%d** new reminders have been sent today.", totalSent)
 
 		// Add per-member breakdown
 		if len(memberTicketCounts) > 0 {
@@ -1370,9 +1383,8 @@ func processFollowUpReminders() error {
 	// Send follow-up reminders in sorted order
 	totalSent := 0
 	memberTicketCounts := make(map[string]int) // Track ticket counts per member
+	memberTickets := make(map[string][]string) // Track ticket keys per member
 	for _, reminder := range eligibleReminders {
-		log.Printf("INFO: Sending 24-hour follow-up reminder for %s to %s (Reminder #%d)", reminder.IssueKey, reminder.QAName, reminder.ReminderNumber)
-
 		// Create ticket object with key and summary for follow-ups
 		ticket := JiraIssue{
 			Key: reminder.IssueKey,
@@ -1392,7 +1404,14 @@ func processFollowUpReminders() error {
 		} else {
 			totalSent++
 			memberTicketCounts[reminder.QAName]++
+			memberTickets[reminder.QAName] = append(memberTickets[reminder.QAName], reminder.IssueKey)
 		}
+	}
+
+	// Log all follow-up reminders sent per member in one line
+	for memberName, tickets := range memberTickets {
+		ticketsList := strings.Join(tickets, ", ")
+		log.Printf("INFO: Sending %d follow-up reminders to %s: %s", len(tickets), memberName, ticketsList)
 	}
 
 	// Send summary message at the end (only if reminders were sent)
@@ -1401,6 +1420,7 @@ func processFollowUpReminders() error {
 
 		// Build summary message with member breakdown
 		summaryMsg := fmt.Sprintf("**%s**\n", today)
+		summaryMsg += "🌅 Good morning! "
 		summaryMsg += `<mention-tag target="seatalk://user?email=shuang.xiao@shopee.com"/>` + "\n"
 		summaryMsg += fmt.Sprintf("**%d** number of follow up reminders have been sent today.", totalSent)
 
@@ -1445,12 +1465,13 @@ func sendFollowUpReminder(ticket JiraIssue, qa GroupMember) error {
 	title := fmt.Sprintf("📚 [Follow-up Required] Knowledge Base Reminder %d", existingReminder.ReminderNumber)
 
 	// Create description for follow-ups (same format as regular reminders, with mention tag)
+	ticketType := ticket.Fields.Issuetype.Name
 	description := fmt.Sprintf(`**QA:** <mention-tag target="seatalk://user?email=%s"/>
-**Jira Ticket:** %s
+**Jira (%s):** %s
 📅 **Completed Testing recently:** %s
 
-Click the appropriate button below when done:`,
-		qa.Email, jiraTicketWithTitle, existingReminder.UpdatedTime.Format("02 Jan 2006"))
+Click the appropriate button below:`,
+		qa.Email, ticketType, jiraTicketWithTitle, existingReminder.UpdatedTime.Format("02 Jan 2006"))
 
 	// Send as interactive thread reply using the original message ID as thread ID
 	buttonID := ticket.Key
@@ -1488,12 +1509,13 @@ func sendStatusReminderToUser(reminder *QAReminder, employeeCode string) error {
 	timeSinceSent := time.Since(reminder.LastSentTime)
 	sentAgo := formatDuration(timeSinceSent)
 
-	description := fmt.Sprintf(`**Jira Ticket:** %s
+	ticketType := reminder.IssueType
+	description := fmt.Sprintf(`**Jira (%s):** %s
 📅 **Completed Testing recently:** %s
 ⏰ **Latest reminder Sent:** %s ago
 
-Click the appropriate button below when done:`,
-		jiraTicketWithTitle, recentlyCompletedTestingDate, sentAgo)
+Click the appropriate button below:`,
+		ticketType, jiraTicketWithTitle, recentlyCompletedTestingDate, sentAgo)
 
 	// Create interactive message with buttons (include reminder number to match thread format)
 	title := fmt.Sprintf("📚 Knowledge Base Reminder %d", reminder.ReminderNumber)
@@ -1629,6 +1651,11 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 				log.Printf("ERROR: Failed to send no reminders message: %v", err)
 			}
 		} else {
+			// Sort reminders by reminder number before sending
+			sort.Slice(userReminders, func(i, j int) bool {
+				return userReminders[i].ReminderNumber < userReminders[j].ReminderNumber
+			})
+
 			// Send interactive message for each reminder
 			for _, reminder := range userReminders {
 				if err := sendStatusReminderToUser(reminder, reqSOP.Event.EmployeeCode); err != nil {
@@ -1707,7 +1734,7 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 • "@KnowledgeBot debug" - Show group ID and debug info
 
 **General Functions:**
-- only query member's jira tickets that have been moved past 2nd review recently within 2 working days
+- only query member's jira tickets that have been moved past 2nd review recently within 2 working days (skip tickets with epic links)
 - will not send duplicated reminders with every trigger
 - will re-trigger in same thread with tags every 24hrs if reminder is not completed
 - cleanup (happens every 2 weeks) will remove completed reminders older than 2 working days
@@ -1926,14 +1953,13 @@ func handleKnowledgeBaseComplete(ctx *gin.Context, event Event, groupID, threadI
 	displayName := getEmployeeDisplayName(event)
 	completedTime := getSingaporeTime()
 
-	// Find the reminder for this user/ticket to get the sent time
+	// Find the reminder for this specific ticket to get the sent time and issue type
 	reminderMutex.RLock()
 	var reminderSentTime time.Time
-	for _, reminder := range qaReminders {
-		if reminder.QAEmail == event.Email || strings.Contains(event.Email, reminder.QAEmail) {
-			reminderSentTime = reminder.SentTime
-			break
-		}
+	var ticketType string
+	if reminder, exists := qaReminders[ticketKey]; exists {
+		reminderSentTime = reminder.SentTime
+		ticketType = reminder.IssueType
 	}
 	reminderMutex.RUnlock()
 
@@ -1958,11 +1984,12 @@ func handleKnowledgeBaseComplete(ctx *gin.Context, event Event, groupID, threadI
 	// Send confirmation message with timestamps
 	confirmMsg := fmt.Sprintf(`✅ **%sKnowledge base is updated by %s**
 
-🎫 **Jira Ticket:** %s
+🎫 **Jira (%s):** %s
 📅 **Reminder Sent:** %s
 📅 **Completed:** %s%s%s`,
 		titlePrefix,
 		displayName,
+		ticketType,
 		jiraTicketWithTitle,
 		reminderSentTime.Format("2006-01-02 15:04:05"),
 		completedTime.Format("2006-01-02 15:04:05"),
@@ -1989,14 +2016,13 @@ func handleKnowledgeBaseCancel(ctx *gin.Context, event Event, groupID, threadID 
 	displayName := getEmployeeDisplayName(event)
 	cancelledTime := getSingaporeTime()
 
-	// Find the reminder for this user/ticket to get the sent time
+	// Find the reminder for this specific ticket to get the sent time and issue type
 	reminderMutex.RLock()
 	var reminderSentTime time.Time
-	for _, reminder := range qaReminders {
-		if reminder.QAEmail == event.Email || strings.Contains(event.Email, reminder.QAEmail) {
-			reminderSentTime = reminder.SentTime
-			break
-		}
+	var ticketType string
+	if reminder, exists := qaReminders[ticketKey]; exists {
+		reminderSentTime = reminder.SentTime
+		ticketType = reminder.IssueType
 	}
 	reminderMutex.RUnlock()
 
@@ -2019,11 +2045,12 @@ func handleKnowledgeBaseCancel(ctx *gin.Context, event Event, groupID, threadID 
 	// Send cancellation message
 	cancelMsg := fmt.Sprintf(`🚫 **%s%s acknowledged that knowledge base does not require update for this Jira ticket**
 
-🎫 **Jira Ticket:** %s
+🎫 **Jira (%s):** %s
 📅 **Reminder Sent:** %s
 📅 **Acknowledged:** %s%s`,
 		titlePrefix,
 		displayName,
+		ticketType,
 		jiraTicketWithTitle,
 		reminderSentTime.Format("2006-01-02 15:04:05"),
 		cancelledTime.Format("2006-01-02 15:04:05"),
