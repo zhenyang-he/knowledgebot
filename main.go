@@ -50,6 +50,7 @@ type JiraFields struct {
 	Updated   string        `json:"updated"`
 	Summary   string        `json:"summary"`
 	Issuetype JiraIssuetype `json:"issuetype"`
+	EpicLink  string        `json:"customfield_10011,omitempty"` // Epic Link field (common Jira custom field ID)
 }
 
 type JiraStatus struct {
@@ -1096,7 +1097,7 @@ func searchJiraQATickets(qaEmail string) ([]JiraIssue, error) {
 	// URL encode the JQL query
 	encodedJQL := url.QueryEscape(jql)
 
-	endpoint := fmt.Sprintf("/rest/api/2/search?jql=%s&maxResults=50&fields=status,updated,summary,issuetype", encodedJQL)
+	endpoint := fmt.Sprintf("/rest/api/2/search?jql=%s&maxResults=50&fields=status,updated,summary,issuetype,customfield_10011", encodedJQL)
 	resp, err := makeJiraRequest("GET", endpoint, nil)
 	if err != nil {
 		log.Printf("ERROR: Failed to search Jira tickets for %s: %v", qaEmail, err)
@@ -1207,10 +1208,17 @@ func processQAReminders(isSilent bool) (int, error) {
 
 		// Tickets are already filtered by JQL query (status + date), so we only need to check for existing reminders
 		var eligibleTickets []JiraIssue
-		log.Printf("DEBUG: Processing %d pre-filtered tickets for QA %s", len(tickets), member.Email)
+		skippedTickets := []string{}    // Tickets with Epic Links
+		existingReminders := []string{} // Tickets that already have reminders
 		for _, ticket := range tickets {
 			reminderKey := ticket.Key
 			log.Printf("DEBUG: Checking ticket %s (Status: %s, Updated: %s)", ticket.Key, ticket.Fields.Status.Name, ticket.Fields.Updated)
+
+			// Skip tickets with Epic Links
+			if ticket.Fields.EpicLink != "" {
+				skippedTickets = append(skippedTickets, ticket.Key)
+				continue
+			}
 
 			reminderMutex.RLock()
 			existingReminder := qaReminders[reminderKey]
@@ -1218,11 +1226,23 @@ func processQAReminders(isSilent bool) (int, error) {
 
 			// Only filter: Skip if reminder was already sent (exists in qaReminders)
 			if existingReminder != nil {
-				log.Printf("DEBUG: Ticket %s already has reminder, skipping", ticket.Key)
+				existingReminders = append(existingReminders, ticket.Key)
 				continue
 			}
 
 			eligibleTickets = append(eligibleTickets, ticket)
+		}
+
+		// Log all existing reminders in one line
+		if len(existingReminders) > 0 {
+			ticketsList := strings.Join(existingReminders, ", ")
+			log.Printf("DEBUG: Skipped %d existing reminders for %s: %s", len(existingReminders), member.DisplayName, ticketsList)
+		}
+
+		// Log all skipped tickets with Epic Links in one line
+		if len(skippedTickets) > 0 {
+			ticketsList := strings.Join(skippedTickets, ", ")
+			log.Printf("DEBUG: Skipped %d reminders with epic links for %s: %s", len(skippedTickets), member.DisplayName, ticketsList)
 		}
 
 		// If no eligible tickets, skip this QA
