@@ -1214,10 +1214,10 @@ func processQAReminders(isSilent bool) (int, error) {
 			errorCount++
 			continue
 		}
+		log.Printf("INFO: Processing %d pre-filtered tickets for QA %s", len(tickets), member.Email)
 
 		// Tickets are already filtered by JQL query (status + date), so we only need to check for existing reminders
 		var eligibleTickets []JiraIssue
-		log.Printf("INFO: Processing %d pre-filtered tickets for QA %s", len(tickets), member.Email)
 		skippedTickets := []string{}
 		for _, ticket := range tickets {
 			reminderKey := ticket.Key
