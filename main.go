@@ -188,7 +188,7 @@ type SendMessageToUserResp struct {
 // Global variables
 var (
 	appAccessToken AppAccessToken
-	groupID        = "NDY5MTA1MzQwMTI5"                   // big group: ODQ0ODgxNzk2Mjg5, small group: OTIzMTMwNjE4MTI4, test group: NDY5MTA1MzQwMTI5
+	groupID        = "ODQ0ODgxNzk2Mjg5"                   // big group: ODQ0ODgxNzk2Mjg5, small group: OTIzMTMwNjE4MTI4, test group: NDY5MTA1MzQwMTI5
 	alertResponses = make(map[string]map[string][]string) // messageID -> employeeCode -> [button_types_pressed]
 	responseMutex  sync.RWMutex
 	jiraServiceURL string
@@ -1101,7 +1101,7 @@ func searchJiraQATickets(qaEmail string) ([]JiraIssue, error) {
 	// URL encode the JQL query
 	encodedJQL := url.QueryEscape(jql)
 
-	endpoint := fmt.Sprintf("/rest/api/2/search?jql=%s&maxResults=50&fields=status,updated,summary,issuetype,parent,customfield_10001", encodedJQL)
+	endpoint := fmt.Sprintf("/rest/api/2/search?jql=%s&maxResults=50&fields=status,updated,summary,issuetype,customfield_10001", encodedJQL)
 	resp, err := makeJiraRequest("GET", endpoint, nil)
 	if err != nil {
 		log.Printf("ERROR: Failed to search Jira tickets for %s: %v", qaEmail, err)
@@ -1217,12 +1217,13 @@ func processQAReminders(isSilent bool) (int, error) {
 
 		// Tickets are already filtered by JQL query (status + date), so we only need to check for existing reminders
 		var eligibleTickets []JiraIssue
+		log.Printf("INFO: Processing %d pre-filtered tickets for QA %s", len(tickets), member.Email)
 		skippedTickets := []string{}
 		for _, ticket := range tickets {
 			reminderKey := ticket.Key
 
-			// Skip tickets with Epic Link (either via parent field or EpicLink custom field)
-			if ticket.Fields.Parent != nil || ticket.Fields.EpicLink != "" {
+			// Skip tickets with Epic Link (via EpicLink custom field)
+			if ticket.Fields.EpicLink != "" {
 				skippedTickets = append(skippedTickets, ticket.Key)
 				continue
 			}
@@ -1725,7 +1726,7 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 • "@KnowledgeBot debug" - Show group ID and debug info
 
 **General Functions:**
-- only query member's jira tickets that have been moved past 2nd review recently within 2 working days
+- only query member's jira tickets that have been moved past 2nd review recently within 2 working days (skip tickets with epic links)
 - will not send duplicated reminders with every trigger
 - will re-trigger in same thread with tags every 24hrs if reminder is not completed
 - cleanup (happens every 2 weeks) will remove completed reminders older than 2 working days
