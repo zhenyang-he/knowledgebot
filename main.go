@@ -50,7 +50,6 @@ type JiraFields struct {
 	Updated   string        `json:"updated"`
 	Summary   string        `json:"summary"`
 	Issuetype JiraIssuetype `json:"issuetype"`
-	Parent    *JiraIssue    `json:"parent,omitempty"`            // Parent Epic (if ticket is linked to an Epic)
 	EpicLink  string        `json:"customfield_10001,omitempty"` // Epic Link custom field
 }
 
