@@ -21,40 +21,6 @@ type JiraConfig struct {
 	APIToken string
 }
 
-// EpicLinkField represents the Epic Link field which can be a string or an object
-type EpicLinkField struct {
-	Key string `json:"key"`
-}
-
-// UnmarshalJSON handles Epic Link field that can be either a string or an object
-func (e *EpicLinkField) UnmarshalJSON(data []byte) error {
-	// Try to unmarshal as string first
-	var str string
-	if err := json.Unmarshal(data, &str); err == nil {
-		e.Key = str
-		return nil
-	}
-	// If not a string, try as object
-	var obj struct {
-		Key string `json:"key"`
-	}
-	if err := json.Unmarshal(data, &obj); err == nil {
-		e.Key = obj.Key
-		return nil
-	}
-	// If both fail, set empty
-	e.Key = ""
-	return nil
-}
-
-// MarshalJSON ensures EpicLinkField is always serialized as a string (for compatibility with main bot)
-func (e EpicLinkField) MarshalJSON() ([]byte, error) {
-	if e.Key == "" {
-		return []byte("null"), nil
-	}
-	return json.Marshal(e.Key)
-}
-
 // JiraIssue represents a Jira issue
 type JiraIssue struct {
 	Key    string `json:"key"`
@@ -66,8 +32,8 @@ type JiraIssue struct {
 		IssueType struct {
 			Name string `json:"name"`
 		} `json:"issuetype"`
-		Updated  string        `json:"updated"`
-		EpicLink EpicLinkField `json:"customfield_10001,omitempty"` // Epic Link custom field
+		Updated  string `json:"updated"`
+		EpicLink string `json:"customfield_10001,omitempty"` // Epic Link custom field
 	} `json:"fields"`
 }
 
@@ -209,52 +175,10 @@ func searchJiraQATickets(qaEmail string) ([]JiraIssue, error) {
 		return nil, fmt.Errorf("Jira API error: %d", resp.StatusCode)
 	}
 
-	// Debug: Log raw Epic Link field format from Jira (first few issues with Epic Links)
-	if len(bodyBytes) > 0 {
-		var debugResult map[string]interface{}
-		if err := json.Unmarshal(bodyBytes, &debugResult); err == nil {
-			if issues, ok := debugResult["issues"].([]interface{}); ok {
-				epicLinkFound := 0
-				for _, issueInterface := range issues {
-					if epicLinkFound >= 3 {
-						break // Only check first 3 with Epic Links
-					}
-					if issue, ok := issueInterface.(map[string]interface{}); ok {
-						if fields, ok := issue["fields"].(map[string]interface{}); ok {
-							if epicLink, exists := fields["customfield_10001"]; exists && epicLink != nil {
-								epicLinkBytes, _ := json.Marshal(epicLink)
-								key, _ := issue["key"].(string)
-								log.Printf("DEBUG: Raw Epic Link for ticket %s - Type: %T, Value: %s", key, epicLink, string(epicLinkBytes))
-								epicLinkFound++
-							}
-						}
-					}
-				}
-				if epicLinkFound == 0 {
-					log.Printf("DEBUG: No Epic Links found in any of the %d tickets returned", len(issues))
-				}
-			}
-		}
-	}
-
 	var result JiraSearchResult
 	if err := json.Unmarshal(bodyBytes, &result); err != nil {
 		log.Printf("ERROR: Failed to decode Jira search response: %v", err)
 		return nil, err
-	}
-
-	// Debug: Log what we successfully parsed
-	epicLinkCount := 0
-	for _, issue := range result.Issues {
-		if issue.Fields.EpicLink.Key != "" {
-			epicLinkCount++
-			if epicLinkCount <= 3 {
-				log.Printf("DEBUG: Parsed Epic Link for ticket %s: '%s'", issue.Key, issue.Fields.EpicLink.Key)
-			}
-		}
-	}
-	if epicLinkCount > 0 {
-		log.Printf("INFO: Successfully parsed %d tickets with Epic Links (will be skipped)", epicLinkCount)
 	}
 
 	return result.Issues, nil
