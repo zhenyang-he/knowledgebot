@@ -21,6 +21,40 @@ type JiraConfig struct {
 	APIToken string
 }
 
+// EpicLinkField represents the Epic Link field which can be a string or an object
+type EpicLinkField struct {
+	Key string `json:"key"`
+}
+
+// UnmarshalJSON handles Epic Link field that can be either a string or an object
+func (e *EpicLinkField) UnmarshalJSON(data []byte) error {
+	// Try to unmarshal as string first
+	var str string
+	if err := json.Unmarshal(data, &str); err == nil {
+		e.Key = str
+		return nil
+	}
+	// If not a string, try as object
+	var obj struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(data, &obj); err == nil {
+		e.Key = obj.Key
+		return nil
+	}
+	// If both fail, set empty
+	e.Key = ""
+	return nil
+}
+
+// MarshalJSON ensures EpicLinkField is always serialized as a string (for compatibility with main bot)
+func (e EpicLinkField) MarshalJSON() ([]byte, error) {
+	if e.Key == "" {
+		return []byte("null"), nil
+	}
+	return json.Marshal(e.Key)
+}
+
 // JiraIssue represents a Jira issue
 type JiraIssue struct {
 	Key    string `json:"key"`
@@ -32,8 +66,8 @@ type JiraIssue struct {
 		IssueType struct {
 			Name string `json:"name"`
 		} `json:"issuetype"`
-		Updated  string `json:"updated"`
-		EpicLink string `json:"customfield_10001,omitempty"` // Epic Link custom field
+		Updated  string        `json:"updated"`
+		EpicLink EpicLinkField `json:"customfield_10001,omitempty"` // Epic Link custom field
 	} `json:"fields"`
 }
 
