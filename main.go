@@ -187,7 +187,7 @@ type SendMessageToUserResp struct {
 // Global variables
 var (
 	appAccessToken AppAccessToken
-	groupID        = "NDY5MTA1MzQwMTI5"                   // big group: ODQ0ODgxNzk2Mjg5, small group: OTIzMTMwNjE4MTI4, test group: NDY5MTA1MzQwMTI5
+	groupID        = "ODQ0ODgxNzk2Mjg5"                   // big group: ODQ0ODgxNzk2Mjg5, small group: OTIzMTMwNjE4MTI4, test group: NDY5MTA1MzQwMTI5
 	alertResponses = make(map[string]map[string][]string) // messageID -> employeeCode -> [button_types_pressed]
 	responseMutex  sync.RWMutex
 	jiraServiceURL string
