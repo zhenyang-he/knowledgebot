@@ -1219,6 +1219,16 @@ func processQAReminders(isSilent bool) (int, error) {
 		var eligibleTickets []JiraIssue
 		skippedTickets := []string{}    // Tickets with Epic Links
 		existingReminders := []string{} // Tickets that already have reminders
+
+		// Debug: Check Epic Links in first few tickets
+		epicLinkDebugCount := 0
+		for _, ticket := range tickets {
+			if epicLinkDebugCount < 3 && ticket.Fields.EpicLink != "" {
+				log.Printf("DEBUG: Found Epic Link in ticket %s: '%s'", ticket.Key, ticket.Fields.EpicLink)
+				epicLinkDebugCount++
+			}
+		}
+
 		for _, ticket := range tickets {
 			reminderKey := ticket.Key
 

@@ -209,10 +209,52 @@ func searchJiraQATickets(qaEmail string) ([]JiraIssue, error) {
 		return nil, fmt.Errorf("Jira API error: %d", resp.StatusCode)
 	}
 
+	// Debug: Log raw Epic Link field format from Jira (first few issues with Epic Links)
+	if len(bodyBytes) > 0 {
+		var debugResult map[string]interface{}
+		if err := json.Unmarshal(bodyBytes, &debugResult); err == nil {
+			if issues, ok := debugResult["issues"].([]interface{}); ok {
+				epicLinkFound := 0
+				for _, issueInterface := range issues {
+					if epicLinkFound >= 3 {
+						break // Only check first 3 with Epic Links
+					}
+					if issue, ok := issueInterface.(map[string]interface{}); ok {
+						if fields, ok := issue["fields"].(map[string]interface{}); ok {
+							if epicLink, exists := fields["customfield_10001"]; exists && epicLink != nil {
+								epicLinkBytes, _ := json.Marshal(epicLink)
+								key, _ := issue["key"].(string)
+								log.Printf("DEBUG: Raw Epic Link for ticket %s - Type: %T, Value: %s", key, epicLink, string(epicLinkBytes))
+								epicLinkFound++
+							}
+						}
+					}
+				}
+				if epicLinkFound == 0 {
+					log.Printf("DEBUG: No Epic Links found in any of the %d tickets returned", len(issues))
+				}
+			}
+		}
+	}
+
 	var result JiraSearchResult
 	if err := json.Unmarshal(bodyBytes, &result); err != nil {
 		log.Printf("ERROR: Failed to decode Jira search response: %v", err)
 		return nil, err
+	}
+
+	// Debug: Log what we successfully parsed
+	epicLinkCount := 0
+	for _, issue := range result.Issues {
+		if issue.Fields.EpicLink.Key != "" {
+			epicLinkCount++
+			if epicLinkCount <= 3 {
+				log.Printf("DEBUG: Parsed Epic Link for ticket %s: '%s'", issue.Key, issue.Fields.EpicLink.Key)
+			}
+		}
+	}
+	if epicLinkCount > 0 {
+		log.Printf("INFO: Successfully parsed %d tickets with Epic Links (will be skipped)", epicLinkCount)
 	}
 
 	return result.Issues, nil
