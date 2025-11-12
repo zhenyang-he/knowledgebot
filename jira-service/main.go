@@ -32,8 +32,9 @@ type JiraIssue struct {
 		IssueType struct {
 			Name string `json:"name"`
 		} `json:"issuetype"`
-		Updated  string `json:"updated"`
-		EpicLink string `json:"customfield_10001,omitempty"` // Epic Link custom field
+		Updated   string `json:"updated"`
+		EpicLink  string `json:"customfield_10001,omitempty"` // Epic Link custom field
+		QADueDate string `json:"customfield_10305,omitempty"` // QA Due Date custom field
 	} `json:"fields"`
 }
 
@@ -150,7 +151,7 @@ func searchJiraQATickets(qaEmail string) ([]JiraIssue, error) {
 	// URL encode the JQL query
 	encodedJQL := url.QueryEscape(jql)
 
-	endpoint := fmt.Sprintf("/rest/api/2/search?jql=%s&maxResults=50&fields=status,updated,summary,issuetype,customfield_10001", encodedJQL)
+	endpoint := fmt.Sprintf("/rest/api/2/search?jql=%s&maxResults=50&fields=status,updated,summary,issuetype,customfield_10001,customfield_10305", encodedJQL)
 	resp, err := makeJiraRequest("GET", endpoint, nil)
 	if err != nil {
 		return nil, err

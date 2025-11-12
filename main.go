@@ -51,6 +51,7 @@ type JiraFields struct {
 	Summary   string        `json:"summary"`
 	Issuetype JiraIssuetype `json:"issuetype"`
 	EpicLink  string        `json:"customfield_10001,omitempty"` // Epic Link custom field
+	QADueDate string        `json:"customfield_10305,omitempty"` // QA Due Date custom field
 }
 
 type JiraStatus struct {
@@ -1099,8 +1100,7 @@ func searchJiraQATickets(qaEmail string) ([]JiraIssue, error) {
 
 	// URL encode the JQL query
 	encodedJQL := url.QueryEscape(jql)
-
-	endpoint := fmt.Sprintf("/rest/api/2/search?jql=%s&maxResults=50&fields=status,updated,summary,issuetype,customfield_10001", encodedJQL)
+	endpoint := fmt.Sprintf("/rest/api/2/search?jql=%s&maxResults=50&fields=status,updated,summary,issuetype,customfield_10001,customfield_10305", encodedJQL)
 	resp, err := makeJiraRequest("GET", endpoint, nil)
 	if err != nil {
 		log.Printf("ERROR: Failed to search Jira tickets for %s: %v", qaEmail, err)
@@ -1217,8 +1217,9 @@ func processQAReminders(isSilent bool) (int, error) {
 
 		// Tickets are already filtered by JQL query (status + date), so we only need to check for existing reminders
 		var eligibleTickets []JiraIssue
-		skippedTickets := []string{}    // Tickets with Epic Links
-		existingReminders := []string{} // Tickets that already have reminders
+		skippedTickets := []string{}     // Tickets with Epic Links
+		skippedOldDueDates := []string{} // Tickets where QA Due Date - Updated > 1 month
+		existingReminders := []string{}  // Tickets that already have reminders
 
 		for _, ticket := range tickets {
 			reminderKey := ticket.Key
@@ -1227,6 +1228,37 @@ func processQAReminders(isSilent bool) (int, error) {
 			if ticket.Fields.EpicLink != "" {
 				skippedTickets = append(skippedTickets, ticket.Key)
 				continue
+			}
+
+			// Skip if QA Due Date exists and the gap between QA Due Date and Updated time is more than 1 month
+			if ticket.Fields.QADueDate != "" {
+				// Parse QA Due Date (format: "2025-11-06")
+				qaDueDate, err := time.Parse("2006-01-02", ticket.Fields.QADueDate)
+				if err != nil {
+					log.Printf("WARN: Failed to parse QA Due Date '%s' for ticket %s: %v", ticket.Fields.QADueDate, ticket.Key, err)
+				} else {
+					// Parse Updated time (format: "2025-11-11T13:56:44.000+0800")
+					// Use same format as existing code (handles both +0800 and -0700)
+					updatedTime, err := time.Parse("2006-01-02T15:04:05.999-0700", ticket.Fields.Updated)
+					if err != nil {
+						// Try alternative format
+						updatedTime, err = time.Parse(time.RFC3339, ticket.Fields.Updated)
+						if err != nil {
+							log.Printf("WARN: Failed to parse Updated time '%s' for ticket %s: %v", ticket.Fields.Updated, ticket.Key, err)
+						}
+					}
+					if err == nil {
+						// Calculate the gap (Updated - QA Due Date)
+						gap := updatedTime.Sub(qaDueDate)
+						oneMonth := 30 * 24 * time.Hour // Approximate 1 month
+						if gap > oneMonth {
+							skippedOldDueDates = append(skippedOldDueDates, ticket.Key)
+							log.Printf("DEBUG: Skipping ticket %s: QA Due Date (%s) is more than 1 month before Updated time (%s), gap: %v",
+								ticket.Key, qaDueDate.Format("2006-01-02"), updatedTime.Format("2006-01-02 15:04:05"), gap)
+							continue
+						}
+					}
+				}
 			}
 
 			reminderMutex.RLock()
@@ -1252,6 +1284,12 @@ func processQAReminders(isSilent bool) (int, error) {
 		if len(skippedTickets) > 0 {
 			ticketsList := strings.Join(skippedTickets, ", ")
 			log.Printf("DEBUG: Skipped %d reminders with epic links for %s: %s", len(skippedTickets), member.DisplayName, ticketsList)
+		}
+
+		// Log all skipped tickets with old QA Due Dates in one line
+		if len(skippedOldDueDates) > 0 {
+			ticketsList := strings.Join(skippedOldDueDates, ", ")
+			log.Printf("DEBUG: Skipped %d old tickets for %s: %s", len(skippedOldDueDates), member.DisplayName, ticketsList)
 		}
 
 		// If no eligible tickets, skip this QA
