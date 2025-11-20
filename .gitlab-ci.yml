@@ -14,9 +14,15 @@ build-and-push:
   stage: build-and-push
   image: docker:24
   services:
-    - docker:24-dind
+    - name: docker:24-dind
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: "/certs"
   before_script:
     - echo "Preparing to build Docker image..."
+    - echo "Waiting for Docker daemon to be ready..."
+    - until docker info; do sleep 1; done
     - docker info
     - echo "Logging in to Harbor..."
     - echo "$HARBOR_PASSWORD" | docker login -u "$HARBOR_USERNAME" --password-stdin $HARBOR_REGISTRY
