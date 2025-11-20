@@ -1,6 +1,6 @@
-module getting-started-bot
+module knowledgebot
 
-go 1.20
+go 1.23.9
 
 require github.com/gin-gonic/gin v1.10.0
 
