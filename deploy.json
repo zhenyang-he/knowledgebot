@@ -1,0 +1,40 @@
+{
+    "project_name": "order",
+    "module_name": "bot",
+    "build": {
+      "enable_multi_cid_merge_build": true,
+      "docker_image": {
+        "base_image": "harbor.shopeemobile.com/shopee/golang-base:1.23.9-24"
+      },
+      "commands": [
+        "wget \"https://spkit.shopee.io/spkit/stable/spkit-$(uname -s| tr '[:upper:]' '[:lower:]')\" -O /usr/local/bin/spkit && chmod a+x /usr/local/bin/spkit",
+        "GOOS='linux' GOARCH='amd64' go build -o knowledgebot main.go"
+      ]
+    },
+    "run": {
+      "enable_prometheus": false,
+      "enable_spex_config_key_fetch": true,
+      "command": "./knowledgebot",
+      "port_definitions": [
+        {
+          "submodule": "knowledgebot"
+        }
+      ],
+      "smoke": {
+        "protocol": "HTTP",
+        "timeout": 5,
+        "retry": 10,
+        "endpoint": "/health",
+        "grace_period": 10,
+        "interval": 5
+      },
+      "check": {
+        "protocol": "HTTP",
+        "timeout": 5,
+        "endpoint": "/health",
+        "max_fails": 10,
+        "interval": 30
+      }
+    }
+}
+  
