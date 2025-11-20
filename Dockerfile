@@ -1,6 +1,5 @@
-# Build stage - using Harbor mirror for faster pulls
-# Using 1.23.9-24 (newer than Go 1.20 requirement, but compatible and available in Harbor)
-FROM harbor.shopeemobile.com/shopee/golang-base:1.23.9-24 AS builder
+# Build stage
+FROM golang:1.20-alpine AS builder
 
 # Set working directory
 WORKDIR /app

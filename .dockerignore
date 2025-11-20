@@ -1,0 +1,36 @@
+# Git files
+.git
+.gitignore
+.gitlab-ci.yml
+
+# Documentation
+*.md
+README.md
+ENV_SETUP.md
+HYBRID_DEPLOYMENT.md
+
+# CI/CD
+render.yaml
+run.sh
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Test files
+*_test.go
+test/
+tests/
+
+# Jira service (separate service)
+jira-service/
+
