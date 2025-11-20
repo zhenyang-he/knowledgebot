@@ -10,7 +10,8 @@ build-and-push:
   stage: build-and-push
   image:
     name: gcr.io/kaniko-project/executor:latest
-    entrypoint: [""]
+  before_script:
+    - echo "Preparing to build Docker image..."
   script:
     - echo "Building and pushing Docker image to Harbor..."
     - /kaniko/executor --context $CI_PROJECT_DIR --dockerfile $CI_PROJECT_DIR/Dockerfile --destination=${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${IMAGE_NAME}:latest --destination=${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${IMAGE_NAME}:${CI_COMMIT_SHORT_SHA} --destination=${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${IMAGE_NAME}:${CI_COMMIT_REF_SLUG} --cache=true --cache-ttl=24h --skip-tls-verify --username="$HARBOR_USERNAME" --password="$HARBOR_PASSWORD"
