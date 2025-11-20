@@ -5,16 +5,21 @@ variables:
   HARBOR_REGISTRY: harbor.test.shopeemobile.com
   HARBOR_PROJECT: knowledgebot
   IMAGE_NAME: knowledgebot
+  KANIKO_TIMEOUT: "30m"
 
 build-and-push:
   stage: build-and-push
   image:
     name: gcr.io/kaniko-project/executor:latest
+  timeout: 30m
   before_script:
     - echo "Preparing to build Docker image..."
+    - echo "Build context: $CI_PROJECT_DIR"
+    - ls -la $CI_PROJECT_DIR
   script:
     - echo "Building and pushing Docker image to Harbor..."
-    - /kaniko/executor --context $CI_PROJECT_DIR --dockerfile $CI_PROJECT_DIR/Dockerfile --destination=${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${IMAGE_NAME}:latest --destination=${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${IMAGE_NAME}:${CI_COMMIT_SHORT_SHA} --destination=${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${IMAGE_NAME}:${CI_COMMIT_REF_SLUG} --cache=true --cache-ttl=24h --skip-tls-verify --username="$HARBOR_USERNAME" --password="$HARBOR_PASSWORD"
+    - echo "This may take several minutes for first build (pulling base images)..."
+    - /kaniko/executor --context $CI_PROJECT_DIR --dockerfile $CI_PROJECT_DIR/Dockerfile --destination=${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${IMAGE_NAME}:latest --destination=${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${IMAGE_NAME}:${CI_COMMIT_SHORT_SHA} --destination=${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${IMAGE_NAME}:${CI_COMMIT_REF_SLUG} --cache=true --cache-ttl=24h --skip-tls-verify --username="$HARBOR_USERNAME" --password="$HARBOR_PASSWORD" --verbosity=info
     - echo "Build and push completed successfully!"
   rules:
     - if: $CI_COMMIT_BRANCH == "master"

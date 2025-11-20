@@ -1,5 +1,6 @@
-# Build stage
-FROM golang:1.20-alpine AS builder
+# Build stage - using Harbor mirror for faster pulls
+# Using 1.23.9-24 (newer than Go 1.20 requirement, but compatible and available in Harbor)
+FROM harbor.shopeemobile.com/shopee/golang-base:1.23.9-24 AS builder
 
 # Set working directory
 WORKDIR /app
@@ -19,7 +20,7 @@ COPY . .
 # Build the application
 RUN CGO_ENABLED=0 GOOS=linux go build -o knowledgebot main.go
 
-# Runtime stage
+# Runtime stage - using standard alpine (Harbor may not have alpine mirror)
 FROM alpine:latest
 
 # Install CA certificates for HTTPS requests
