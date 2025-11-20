@@ -1,4 +1,5 @@
 stages:
+  - test
   - build-and-push
 
 variables:
@@ -7,6 +8,23 @@ variables:
   IMAGE_NAME: knowledgebot
   KANIKO_TIMEOUT: "30m"
 
+# Simple test job - no Docker, just to verify pipeline works
+test:
+  stage: test
+  image: alpine:latest
+  script:
+    - echo "Testing pipeline without Docker build..."
+    - echo "Current directory: $(pwd)"
+    - echo "Files in directory:"
+    - ls -la
+    - echo "Go version check:"
+    - which go || echo "Go not installed (expected in alpine)"
+    - echo "Test completed successfully!"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "master"
+    - if: $CI_COMMIT_TAG
+
+# Build and push Docker image using Kaniko (no Docker daemon needed)
 build-and-push:
   stage: build-and-push
   image:
