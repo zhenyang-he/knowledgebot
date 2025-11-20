@@ -17,32 +17,11 @@ build-and-push:
     entrypoint: [""]
   script:
     - echo "Building and pushing Docker image to Harbor..."
+    - /kaniko/executor --context $CI_PROJECT_DIR --dockerfile $CI_PROJECT_DIR/Dockerfile --destination=${IMAGE_TAG}:latest --destination=${IMAGE_TAG}:${CI_COMMIT_SHORT_SHA} --destination=${IMAGE_TAG}:${CI_COMMIT_REF_SLUG} --cache=true --cache-ttl=24h --skip-tls-verify --username="$HARBOR_USERNAME" --password="$HARBOR_PASSWORD"
     - |
-      /kaniko/executor \
-        --context $CI_PROJECT_DIR \
-        --dockerfile $CI_PROJECT_DIR/Dockerfile \
-        --destination=${IMAGE_TAG}:latest \
-        --destination=${IMAGE_TAG}:${CI_COMMIT_SHORT_SHA} \
-        --destination=${IMAGE_TAG}:${CI_COMMIT_REF_SLUG} \
-        --cache=true \
-        --cache-ttl=24h \
-        --skip-tls-verify \
-        --username="$HARBOR_USERNAME" \
-        --password="$HARBOR_PASSWORD"
-    - |
-      # Push additional version tags if it's a tag commit
       if [ -n "$CI_COMMIT_TAG" ]; then
         echo "Pushing version tags: ${CI_COMMIT_TAG} and $(echo $CI_COMMIT_TAG | sed 's/^v//')"
-        /kaniko/executor \
-          --context $CI_PROJECT_DIR \
-          --dockerfile $CI_PROJECT_DIR/Dockerfile \
-          --destination=${IMAGE_TAG}:${CI_COMMIT_TAG} \
-          --destination=${IMAGE_TAG}:$(echo $CI_COMMIT_TAG | sed 's/^v//') \
-          --cache=true \
-          --cache-ttl=24h \
-          --skip-tls-verify \
-          --username="$HARBOR_USERNAME" \
-          --password="$HARBOR_PASSWORD"
+        /kaniko/executor --context $CI_PROJECT_DIR --dockerfile $CI_PROJECT_DIR/Dockerfile --destination=${IMAGE_TAG}:${CI_COMMIT_TAG} --destination=${IMAGE_TAG}:$(echo $CI_COMMIT_TAG | sed 's/^v//') --cache=true --cache-ttl=24h --skip-tls-verify --username="$HARBOR_USERNAME" --password="$HARBOR_PASSWORD"
       fi
     - echo "Build and push completed successfully!"
     - echo "Image available at: ${IMAGE_TAG}:latest"
