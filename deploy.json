@@ -4,7 +4,11 @@
     "build": {
       "enable_multi_cid_merge_build": true,
       "docker_image": {
-        "base_image": "harbor.shopeemobile.com/shopee/golang-base:1.23.9-24"
+        "base_image": "harbor.shopeemobile.com/shopee/golang-base:1.23.9-24",
+        "dependent_libraries_files": [
+          "go.mod",
+          "go.sum"
+        ]
       },
       "commands": [
         "wget \"https://spkit.shopee.io/spkit/stable/spkit-$(uname -s| tr '[:upper:]' '[:lower:]')\" -O /usr/local/bin/spkit && chmod a+x /usr/local/bin/spkit",
