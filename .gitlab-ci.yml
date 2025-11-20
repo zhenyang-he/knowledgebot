@@ -14,11 +14,11 @@ test:
   image: alpine:latest
   script:
     - echo "Testing pipeline without Docker build..."
-    - echo "Current directory: $(pwd)"
-    - echo "Files in directory:"
+    - 'echo "Current directory: $(pwd)"'
+    - 'echo "Files in directory:"'
     - ls -la
-    - echo "Go version check:"
-    - which go || echo "Go not installed (expected in alpine)"
+    - 'echo "Go version check:"'
+    - 'which go || echo "Go not installed (expected in alpine)"'
     - echo "Test completed successfully!"
   rules:
     - if: $CI_COMMIT_BRANCH == "master"
