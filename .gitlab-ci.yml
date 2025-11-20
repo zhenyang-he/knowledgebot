@@ -12,6 +12,9 @@ build-and-push:
   stage: build-and-push
   image: quay.io/buildah/stable:latest
   timeout: 30m
+  variables:
+    STORAGE_DRIVER: vfs
+    BUILDAH_ISOLATION: chroot
   before_script:
     - echo "Preparing to build Docker image..."
     - buildah version
@@ -19,7 +22,7 @@ build-and-push:
     - echo "$HARBOR_PASSWORD" | buildah login -u "$HARBOR_USERNAME" --password-stdin $HARBOR_REGISTRY
   script:
     - echo "Building Docker image..."
-    - buildah bud --tag ${IMAGE_TAG}:latest --tag ${IMAGE_TAG}:${CI_COMMIT_SHORT_SHA} --tag ${IMAGE_TAG}:${CI_COMMIT_REF_SLUG} .
+    - buildah bud --storage-driver vfs --isolation chroot --tag ${IMAGE_TAG}:latest --tag ${IMAGE_TAG}:${CI_COMMIT_SHORT_SHA} --tag ${IMAGE_TAG}:${CI_COMMIT_REF_SLUG} .
     - |
       if [ -n "$CI_COMMIT_TAG" ]; then
         buildah tag ${IMAGE_TAG}:latest ${IMAGE_TAG}:${CI_COMMIT_TAG}
