@@ -1,81 +1,51 @@
-# GitLab CI/CD for building and pushing Docker image to Harbor
+# GitLab CI/CD for building and pushing Docker image to Harbor using Kaniko
 
 stages:
-  - build
-  - push
+  - build-and-push
 
 variables:
   HARBOR_REGISTRY: harbor.test.shopeemobile.com
   HARBOR_PROJECT: knowledgebot
   IMAGE_NAME: knowledgebot
-  DOCKER_DRIVER: overlay2
-  DOCKER_TLS_CERTDIR: "/certs"
+  IMAGE_TAG: ${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${IMAGE_NAME}
 
-# Build Docker image
-build:
-  stage: build
-  image: docker:24-dind
-  services:
-    - docker:24-dind
-  before_script:
-    - docker info
-    - echo "Logging in to Harbor..."
-    - echo "$HARBOR_PASSWORD" | docker login -u "$HARBOR_USERNAME" --password-stdin $HARBOR_REGISTRY
+# Build and push Docker image using Kaniko (no Docker daemon needed)
+build-and-push:
+  stage: build-and-push
+  image:
+    name: gcr.io/kaniko-project/executor:latest
+    entrypoint: [""]
   script:
-    - echo "Building Docker image..."
+    - echo "Building and pushing Docker image to Harbor..."
     - |
-      IMAGE_TAG="${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${IMAGE_NAME}"
-      
-      # Build with multiple tags
-      docker build \
-        --tag ${IMAGE_TAG}:latest \
-        --tag ${IMAGE_TAG}:${CI_COMMIT_SHORT_SHA} \
-        --tag ${IMAGE_TAG}:${CI_COMMIT_REF_SLUG} \
-        .
-      
-      # Add version tag if it's a tag commit
-      if [ -n "$CI_COMMIT_TAG" ]; then
-        docker tag ${IMAGE_TAG}:latest ${IMAGE_TAG}:${CI_COMMIT_TAG}
-        docker tag ${IMAGE_TAG}:latest ${IMAGE_TAG}:$(echo $CI_COMMIT_TAG | sed 's/^v//')
-      fi
-      
-      echo "Build completed successfully!"
-      docker images | grep ${IMAGE_NAME}
-  rules:
-    - if: $CI_COMMIT_BRANCH
-    - if: $CI_COMMIT_TAG
-
-# Push Docker image to Harbor
-push:
-  stage: push
-  image: docker:24-dind
-  services:
-    - docker:24-dind
-  dependencies:
-    - build
-  before_script:
-    - docker info
-    - echo "Logging in to Harbor..."
-    - echo "$HARBOR_PASSWORD" | docker login -u "$HARBOR_USERNAME" --password-stdin $HARBOR_REGISTRY
-  script:
-    - echo "Pushing Docker image to Harbor..."
+      /kaniko/executor \
+        --context $CI_PROJECT_DIR \
+        --dockerfile $CI_PROJECT_DIR/Dockerfile \
+        --destination=${IMAGE_TAG}:latest \
+        --destination=${IMAGE_TAG}:${CI_COMMIT_SHORT_SHA} \
+        --destination=${IMAGE_TAG}:${CI_COMMIT_REF_SLUG} \
+        --cache=true \
+        --cache-ttl=24h \
+        --skip-tls-verify \
+        --username="$HARBOR_USERNAME" \
+        --password="$HARBOR_PASSWORD"
     - |
-      IMAGE_TAG="${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${IMAGE_NAME}"
-      
-      # Push all tags
-      docker push ${IMAGE_TAG}:latest
-      docker push ${IMAGE_TAG}:${CI_COMMIT_SHORT_SHA}
-      docker push ${IMAGE_TAG}:${CI_COMMIT_REF_SLUG}
-      
-      # Push version tag if it's a tag commit
+      # Push additional version tags if it's a tag commit
       if [ -n "$CI_COMMIT_TAG" ]; then
-        docker push ${IMAGE_TAG}:${CI_COMMIT_TAG}
-        docker push ${IMAGE_TAG}:$(echo $CI_COMMIT_TAG | sed 's/^v//')
+        echo "Pushing version tags: ${CI_COMMIT_TAG} and $(echo $CI_COMMIT_TAG | sed 's/^v//')"
+        /kaniko/executor \
+          --context $CI_PROJECT_DIR \
+          --dockerfile $CI_PROJECT_DIR/Dockerfile \
+          --destination=${IMAGE_TAG}:${CI_COMMIT_TAG} \
+          --destination=${IMAGE_TAG}:$(echo $CI_COMMIT_TAG | sed 's/^v//') \
+          --cache=true \
+          --cache-ttl=24h \
+          --skip-tls-verify \
+          --username="$HARBOR_USERNAME" \
+          --password="$HARBOR_PASSWORD"
       fi
-      
-      echo "Push completed successfully!"
-      echo "Image available at: ${IMAGE_TAG}:latest"
+    - echo "Build and push completed successfully!"
+    - echo "Image available at: ${IMAGE_TAG}:latest"
   rules:
     - if: $CI_COMMIT_BRANCH == "master"
     - if: $CI_COMMIT_TAG
-
