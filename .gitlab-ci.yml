@@ -14,7 +14,7 @@ build-and-push:
   timeout: 30m
   before_script:
     - echo "Preparing to build Docker image..."
-    - echo "Build context: $CI_PROJECT_DIR"
+    - 'echo "Build context: $CI_PROJECT_DIR"'
     - ls -la $CI_PROJECT_DIR
   script:
     - echo "Building and pushing Docker image to Harbor..."
