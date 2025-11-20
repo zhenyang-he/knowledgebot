@@ -12,6 +12,7 @@
       },
       "commands": [
         "wget \"https://spkit.shopee.io/spkit/stable/spkit-$(uname -s| tr '[:upper:]' '[:lower:]')\" -O /usr/local/bin/spkit && chmod a+x /usr/local/bin/spkit",
+        "go mod tidy",
         "GOOS='linux' GOARCH='amd64' go build -o knowledgebot ."
       ]
     },
