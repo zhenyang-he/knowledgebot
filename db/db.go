@@ -73,9 +73,17 @@ func Init() error {
 		PRIMARY KEY (email, date)
 	);
 
+	CREATE TABLE IF NOT EXISTS main_reminders (
+		issue_key TEXT PRIMARY KEY,
+		qa_email TEXT NOT NULL,
+		message_id TEXT NOT NULL,
+		sent_time TIMESTAMP NOT NULL
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_reminders_qa_email ON reminders(qa_email);
 	CREATE INDEX IF NOT EXISTS idx_reminders_completed_time ON reminders(completed_time);
 	CREATE INDEX IF NOT EXISTS idx_reminders_last_sent_time ON reminders(last_sent_time);
+	CREATE INDEX IF NOT EXISTS idx_main_reminders_qa_email ON main_reminders(qa_email);
 	`
 
 	if _, err := conn.Exec(createTablesSQL); err != nil {
@@ -179,6 +187,30 @@ func (db *DB) SaveDailyMessage(email, date string) error {
 	return err
 }
 
+// SaveMainReminder saves a main reminder to the database (only essential fields)
+func (db *DB) SaveMainReminder(reminder *QAReminder) error {
+	if !db.IsAvailable() {
+		return nil // Database not available, skip
+	}
+
+	_, err := db.conn.Exec(`
+		INSERT INTO main_reminders (
+			issue_key, qa_email, message_id, sent_time
+		) VALUES ($1, $2, $3, $4)
+		ON CONFLICT (issue_key) DO UPDATE SET
+			qa_email = EXCLUDED.qa_email,
+			message_id = EXCLUDED.message_id,
+			sent_time = EXCLUDED.sent_time
+	`,
+		reminder.IssueKey,
+		reminder.QAEmail,
+		reminder.MessageID,
+		reminder.SentTime,
+	)
+
+	return err
+}
+
 // LoadAllReminders loads all reminders from database
 func (db *DB) LoadAllReminders() ([]*QAReminder, error) {
 	if !db.IsAvailable() {
@@ -271,6 +303,41 @@ func (db *DB) LoadAllDailyMessages() (map[string]string, error) {
 	}
 
 	return messages, nil
+}
+
+// LoadAllMainReminders loads all main reminders from the database (only essential fields)
+func (db *DB) LoadAllMainReminders() ([]QAReminder, error) {
+	if !db.IsAvailable() {
+		return nil, fmt.Errorf("database not available")
+	}
+
+	rows, err := db.conn.Query(`
+		SELECT issue_key, qa_email, message_id, sent_time
+		FROM main_reminders
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var reminders []QAReminder
+	for rows.Next() {
+		var r QAReminder
+		if err := rows.Scan(
+			&r.IssueKey,
+			&r.QAEmail,
+			&r.MessageID,
+			&r.SentTime,
+		); err != nil {
+			return nil, err
+		}
+		// Set default values for fields not stored in main_reminders
+		r.ReminderNumber = 0
+		r.LastSentTime = r.SentTime
+		reminders = append(reminders, r)
+	}
+
+	return reminders, rows.Err()
 }
 
 // DeleteReminder deletes a reminder from database

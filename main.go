@@ -926,23 +926,15 @@ func sendMainQAReminder(qa GroupMember, ticketCount int, isSilent bool) (string,
 	qaReminders[mainKey] = reminder
 	reminderMutex.Unlock()
 
-	// Save to database
+	// Save to main_reminders table (only essential fields)
 	if dbInstance := db.GetDB(); dbInstance != nil {
 		dbReminder := &db.QAReminder{
-			IssueKey:       reminder.IssueKey,
-			QAName:         reminder.QAName,
-			QAEmail:        reminder.QAEmail,
-			MessageID:      reminder.MessageID,
-			SentTime:       reminder.SentTime,
-			LastSentTime:   reminder.LastSentTime,
-			ReminderNumber: reminder.ReminderNumber,
-			Summary:        reminder.Summary,
-			IssueType:      reminder.IssueType,
-			ButtonStatus:   reminder.ButtonStatus,
-			UpdatedTime:    reminder.UpdatedTime,
-			CompletedTime:  reminder.CompletedTime,
+			IssueKey:  reminder.IssueKey,
+			QAEmail:   reminder.QAEmail,
+			MessageID: reminder.MessageID,
+			SentTime:  reminder.SentTime,
 		}
-		if err := dbInstance.SaveReminder(dbReminder); err != nil {
+		if err := dbInstance.SaveMainReminder(dbReminder); err != nil {
 			log.Printf("WARN: Failed to save main reminder to database: %v", err)
 		}
 	}
@@ -2613,6 +2605,32 @@ func loadAllFromDB() error {
 			ButtonStatus:   r.ButtonStatus,
 			UpdatedTime:    r.UpdatedTime,
 			CompletedTime:  r.CompletedTime,
+		}
+	}
+	reminderMutex.Unlock()
+
+	// Load main reminders (for threading purposes)
+	mainReminders, err := dbInstance.LoadAllMainReminders()
+	if err != nil {
+		return fmt.Errorf("failed to load main reminders: %w", err)
+	}
+
+	reminderMutex.Lock()
+	for _, r := range mainReminders {
+		// Main reminders only store essential fields, set defaults for others
+		qaReminders[r.IssueKey] = &QAReminder{
+			IssueKey:       r.IssueKey,
+			QAName:         formatEmailAsName(r.QAEmail), // Derive name from email
+			QAEmail:        r.QAEmail,
+			MessageID:      r.MessageID,
+			SentTime:       r.SentTime,
+			LastSentTime:   r.SentTime, // Use sent_time as last_sent_time
+			ReminderNumber: 0,          // Main reminders don't have numbers
+			Summary:        "",         // Not applicable
+			IssueType:      "",         // Not applicable
+			ButtonStatus:   "",         // Not applicable
+			UpdatedTime:    r.SentTime,
+			CompletedTime:  time.Time{}, // Never completed
 		}
 	}
 	reminderMutex.Unlock()
