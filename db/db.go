@@ -350,6 +350,19 @@ func (db *DB) DeleteReminder(issueKey string) error {
 	return err
 }
 
+// DeleteOldMainReminders deletes main reminders older than the specified number of days
+func (db *DB) DeleteOldMainReminders(daysOld int) error {
+	if !db.IsAvailable() {
+		return nil
+	}
+
+	_, err := db.conn.Exec(fmt.Sprintf(`
+		DELETE FROM main_reminders 
+		WHERE sent_time < NOW() - INTERVAL '%d days'
+	`, daysOld))
+	return err
+}
+
 // DeleteOldDailyMessages deletes daily messages older than the specified date
 func (db *DB) DeleteOldDailyMessages(date string) error {
 	if !db.IsAvailable() {

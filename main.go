@@ -2309,6 +2309,17 @@ func cleanupOldReminders() error {
 	}
 
 	log.Printf("INFO: Cleanup complete. Removed %d completed reminders", removedCount)
+
+	// Also cleanup old main reminders (older than 7 days)
+	// Main reminders are only needed for threading recent reminders
+	if dbInstance := db.GetDB(); dbInstance != nil {
+		if err := dbInstance.DeleteOldMainReminders(7); err != nil {
+			log.Printf("WARN: Failed to delete old main reminders from database: %v", err)
+		} else {
+			log.Printf("INFO: Cleaned up main reminders older than 7 days")
+		}
+	}
+
 	return nil
 }
 
