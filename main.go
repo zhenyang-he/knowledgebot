@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -19,6 +20,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"knowledgebot/db"
 
 	"github.com/gin-gonic/gin"
 )
@@ -316,6 +319,20 @@ func generateKnowledgeBaseList() string {
 }
 
 func main() {
+	// Initialize database connection (optional - will continue without DB if not configured)
+	if err := db.Init(); err != nil {
+		log.Printf("WARN: Database not available (continuing with in-memory only): %v", err)
+		log.Println("INFO: To enable persistence, set DATABASE_URL environment variable")
+	} else {
+		log.Println("INFO: Database connection established")
+		// Load existing data from database
+		if err := loadAllFromDB(); err != nil {
+			log.Printf("WARN: Failed to load data from database: %v", err)
+		} else {
+			log.Printf("INFO: Loaded %d reminders from database", len(qaReminders))
+		}
+	}
+
 	// Initialize Jira service URL
 	jiraServiceURL = getEnvOrDefault("JIRA_SERVICE_URL", "")
 
@@ -330,11 +347,10 @@ func main() {
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT)
 	r := gin.New()
 
-	// Custom logger that skips health check and callback endpoints
+	// Custom logger that skips callback endpoints (frequent automated requests)
 	r.Use(gin.LoggerWithFormatter(func(param gin.LogFormatterParams) string {
-		// Skip logging for GET /health, root path, and callback endpoints (frequent automated requests)
-		// Keep HEAD /health logs for monitoring visibility
-		if param.Path == "/callback" || param.Path == "/" || (param.Path == "/health" && param.Method == "GET") {
+		// Skip logging for callback endpoints only
+		if param.Path == "/callback" {
 			return ""
 		}
 		// Simplified format: IP, Method, Path, Status, Latency, UserAgent
@@ -354,6 +370,9 @@ func main() {
 	// Health check endpoint for uptime monitoring (no signature validation needed)
 	// Enhanced health check that verifies critical components
 	healthHandler := func(ctx *gin.Context) {
+		// Log health check requests
+		log.Printf("INFO: Health check request from %s (User-Agent: %s)", ctx.ClientIP(), ctx.Request.UserAgent())
+
 		healthStatus := gin.H{
 			"status": "healthy",
 			"bot":    "knowledgebot",
@@ -371,13 +390,11 @@ func main() {
 		ctx.JSON(http.StatusOK, healthStatus)
 	}
 
-	// Support both GET and HEAD requests for health checks
+	// Support GET requests for health checks
 	r.GET("/health", healthHandler)
-	r.HEAD("/health", healthHandler)
 
 	// Root path handler for uptime monitors that hit "/"
 	r.GET("/", healthHandler)
-	r.HEAD("/", healthHandler)
 
 	// Callback endpoint with conditional signature validation
 	r.POST("/callback", func(ctx *gin.Context) {
@@ -893,7 +910,7 @@ func sendMainQAReminder(qa GroupMember, ticketCount int, isSilent bool) (string,
 	today := getSingaporeTime().Format("2006-01-02")
 	mainKey := fmt.Sprintf("main_%s_%s", qa.Email, today)
 	reminderMutex.Lock()
-	qaReminders[mainKey] = &QAReminder{
+	reminder := &QAReminder{
 		IssueKey:       mainKey,
 		QAName:         qa.DisplayName,
 		QAEmail:        qa.Email,
@@ -903,7 +920,29 @@ func sendMainQAReminder(qa GroupMember, ticketCount int, isSilent bool) (string,
 		ReminderNumber: 0,                  // Main reminder doesn't have a number
 		UpdatedTime:    getSingaporeTime(), // Use current time for main reminder
 	}
+	qaReminders[mainKey] = reminder
 	reminderMutex.Unlock()
+
+	// Save to database
+	if dbInstance := db.GetDB(); dbInstance != nil {
+		dbReminder := &db.QAReminder{
+			IssueKey:       reminder.IssueKey,
+			QAName:         reminder.QAName,
+			QAEmail:        reminder.QAEmail,
+			MessageID:      reminder.MessageID,
+			SentTime:       reminder.SentTime,
+			LastSentTime:   reminder.LastSentTime,
+			ReminderNumber: reminder.ReminderNumber,
+			Summary:        reminder.Summary,
+			IssueType:      reminder.IssueType,
+			ButtonStatus:   reminder.ButtonStatus,
+			UpdatedTime:    reminder.UpdatedTime,
+			CompletedTime:  reminder.CompletedTime,
+		}
+		if err := dbInstance.SaveReminder(dbReminder); err != nil {
+			log.Printf("WARN: Failed to save main reminder to database: %v", err)
+		}
+	}
 
 	return messageID, nil
 }
@@ -914,7 +953,16 @@ func getNextReminderNumber(qaEmail string) int {
 	defer qaCountMutex.Unlock()
 
 	qaReminderCounts[qaEmail]++
-	return qaReminderCounts[qaEmail]
+	count := qaReminderCounts[qaEmail]
+
+	// Save to database
+	if dbInstance := db.GetDB(); dbInstance != nil {
+		if err := dbInstance.SaveReminderCount(qaEmail, count); err != nil {
+			log.Printf("WARN: Failed to save reminder count to database: %v", err)
+		}
+	}
+
+	return count
 }
 
 // Decrease reminder count when a reminder is completed
@@ -924,6 +972,14 @@ func decreaseReminderCount(qaEmail string) {
 
 	if qaReminderCounts[qaEmail] > 0 {
 		qaReminderCounts[qaEmail]--
+		count := qaReminderCounts[qaEmail]
+
+		// Save to database
+		if dbInstance := db.GetDB(); dbInstance != nil {
+			if err := dbInstance.SaveReminderCount(qaEmail, count); err != nil {
+				log.Printf("WARN: Failed to save reminder count to database: %v", err)
+			}
+		}
 	}
 }
 
@@ -971,7 +1027,7 @@ Click the appropriate button below:`,
 		log.Printf("WARN: Main reminder not found for %s, using individual message ID as thread ID", qa.Email)
 	}
 
-	qaReminders[ticket.Key] = &QAReminder{
+	reminder := &QAReminder{
 		IssueKey:       ticket.Key,
 		QAName:         qa.DisplayName,
 		QAEmail:        qa.Email,
@@ -984,7 +1040,29 @@ Click the appropriate button below:`,
 		ButtonStatus:   "",                           // Initialize as empty
 		UpdatedTime:    updatedTime,                  // Store Jira update time
 	}
+	qaReminders[ticket.Key] = reminder
 	reminderMutex.Unlock()
+
+	// Save to database
+	if dbInstance := db.GetDB(); dbInstance != nil {
+		dbReminder := &db.QAReminder{
+			IssueKey:       reminder.IssueKey,
+			QAName:         reminder.QAName,
+			QAEmail:        reminder.QAEmail,
+			MessageID:      reminder.MessageID,
+			SentTime:       reminder.SentTime,
+			LastSentTime:   reminder.LastSentTime,
+			ReminderNumber: reminder.ReminderNumber,
+			Summary:        reminder.Summary,
+			IssueType:      reminder.IssueType,
+			ButtonStatus:   reminder.ButtonStatus,
+			UpdatedTime:    reminder.UpdatedTime,
+			CompletedTime:  reminder.CompletedTime,
+		}
+		if err := dbInstance.SaveReminder(dbReminder); err != nil {
+			log.Printf("WARN: Failed to save ticket reminder to database: %v", err)
+		}
+	}
 
 	return nil
 }
@@ -1407,8 +1485,8 @@ func processFollowUpReminders() error {
 			continue
 		}
 
-		// Check if 24 hours have passed since last reminder
-		if now.Sub(reminder.LastSentTime) >= 24*time.Hour {
+		// Check if 20 hours have passed since last reminder
+		if now.Sub(reminder.LastSentTime) >= 20*time.Hour {
 			eligibleReminders = append(eligibleReminders, reminder)
 		}
 	}
@@ -1524,6 +1602,27 @@ Click the appropriate button below:`,
 	reminderMutex.Lock()
 	existingReminder.LastSentTime = now
 	reminderMutex.Unlock()
+
+	// Save to database
+	if dbInstance := db.GetDB(); dbInstance != nil {
+		dbReminder := &db.QAReminder{
+			IssueKey:       existingReminder.IssueKey,
+			QAName:         existingReminder.QAName,
+			QAEmail:        existingReminder.QAEmail,
+			MessageID:      existingReminder.MessageID,
+			SentTime:       existingReminder.SentTime,
+			LastSentTime:   existingReminder.LastSentTime,
+			ReminderNumber: existingReminder.ReminderNumber,
+			Summary:        existingReminder.Summary,
+			IssueType:      existingReminder.IssueType,
+			ButtonStatus:   existingReminder.ButtonStatus,
+			UpdatedTime:    existingReminder.UpdatedTime,
+			CompletedTime:  existingReminder.CompletedTime,
+		}
+		if err := dbInstance.SaveReminder(dbReminder); err != nil {
+			log.Printf("WARN: Failed to save follow-up reminder to database: %v", err)
+		}
+	}
 
 	log.Printf("INFO: Follow-up QA reminder sent for %s to %s", ticket.Key, qa.DisplayName)
 	return nil
@@ -1775,7 +1874,7 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 - only query member's jira tickets that have been moved past 2nd review recently within 2 working days (skip tickets with epic links)
 - will not send duplicated reminders with every trigger
 - will re-trigger in same thread with tags every 24hrs if reminder is not completed
-- cleanup (happens every 2 weeks) will remove completed reminders older than 2 working days
+- cleanup (happens every month) will remove completed reminders older than 2 working days
 
 **For Manager:**
 - can manually trigger query jira tickets via bot with "jira" or auto triggered every working day at 10am GMT+8
@@ -2123,6 +2222,27 @@ func markQAReminderCompleted(ticketKey, buttonStatus string) {
 		displayName := formatEmailAsName(reminder.QAEmail)
 		log.Printf("INFO: QA reminder for %s marked as completed by %s with status: %s", ticketKey, displayName, buttonStatus)
 
+		// Save to database
+		if dbInstance := db.GetDB(); dbInstance != nil {
+			dbReminder := &db.QAReminder{
+				IssueKey:       reminder.IssueKey,
+				QAName:         reminder.QAName,
+				QAEmail:        reminder.QAEmail,
+				MessageID:      reminder.MessageID,
+				SentTime:       reminder.SentTime,
+				LastSentTime:   reminder.LastSentTime,
+				ReminderNumber: reminder.ReminderNumber,
+				Summary:        reminder.Summary,
+				IssueType:      reminder.IssueType,
+				ButtonStatus:   reminder.ButtonStatus,
+				UpdatedTime:    reminder.UpdatedTime,
+				CompletedTime:  reminder.CompletedTime,
+			}
+			if err := dbInstance.SaveReminder(dbReminder); err != nil {
+				log.Printf("WARN: Failed to save completed reminder to database: %v", err)
+			}
+		}
+
 		// Decrease the reminder count for this QA
 		decreaseReminderCount(reminder.QAEmail)
 	} else {
@@ -2130,7 +2250,7 @@ func markQAReminderCompleted(ticketKey, buttonStatus string) {
 	}
 }
 
-// Start cleanup scheduler to remove completed reminders every 2 weeks on Monday at 12am
+// Start cleanup scheduler to remove completed reminders every month on the 1st at 12am
 func startReminderCleanup() {
 	// Recover from panics to prevent scheduler crash
 	defer func() {
@@ -2142,41 +2262,27 @@ func startReminderCleanup() {
 		}
 	}()
 
-	log.Println("INFO: Starting reminder cleanup scheduler (runs every 2 weeks on Monday at 12am)")
-
-	// Track if we've run cleanup this cycle
-	cleanupRun := false
+	log.Println("INFO: Starting reminder cleanup scheduler (runs every month on the 1st at 12am)")
 
 	for {
 		now := getSingaporeTime()
 
-		// Calculate next Monday at 12am (midnight)
-		daysUntilMonday := (8 - int(now.Weekday())) % 7
-		if daysUntilMonday == 0 {
-			// It's Monday, check if we're past midnight
-			nextMonday := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-			if now.After(nextMonday) {
-				// Already past midnight, schedule for next Monday
-				daysUntilMonday = 7
-			}
+		// Calculate next 1st of the month at 12am (midnight)
+		nextFirst := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+		if now.After(nextFirst) || now.Equal(nextFirst) {
+			// Already past or at the 1st this month, schedule for next month
+			nextFirst = nextFirst.AddDate(0, 1, 0)
 		}
 
-		nextMonday := now.AddDate(0, 0, daysUntilMonday)
-		nextMonday = time.Date(nextMonday.Year(), nextMonday.Month(), nextMonday.Day(), 0, 0, 0, 0, nextMonday.Location())
-
-		// Wait until next Monday at midnight
-		sleepDuration := nextMonday.Sub(now)
+		// Wait until next 1st of the month at midnight
+		sleepDuration := nextFirst.Sub(now)
+		log.Printf("INFO: Next cleanup scheduled for %s GMT+8 (in %s)", nextFirst.Format("2006-01-02 15:04:05"), sleepDuration)
 		time.Sleep(sleepDuration)
 
-		// Only run cleanup every 2 weeks (alternate Mondays)
-		if !cleanupRun {
-			log.Println("INFO: Running bi-weekly reminder cleanup (Monday 12am)")
-			if err := cleanupOldReminders(); err != nil {
-				log.Printf("ERROR: Failed to cleanup old reminders: %v", err)
-			}
-			cleanupRun = true
-		} else {
-			cleanupRun = false
+		// Run cleanup on the 1st of the month
+		log.Println("INFO: Running monthly reminder cleanup (1st of month 12am)")
+		if err := cleanupOldReminders(); err != nil {
+			log.Printf("ERROR: Failed to cleanup old reminders: %v", err)
 		}
 
 		// Sleep for a minute to avoid running multiple times
@@ -2184,49 +2290,30 @@ func startReminderCleanup() {
 	}
 }
 
-// Remove completed reminders older than 2 business days
+// Remove all completed reminders
 func cleanupOldReminders() error {
-	now := getSingaporeTime()
-
-	// Calculate cutoff time: 2 business days ago
-	var cutoffTime time.Time
-	switch now.Weekday() {
-	case time.Monday:
-		// Monday: go back to last Wednesday
-		cutoffTime = now.AddDate(0, 0, -5)
-	case time.Tuesday:
-		// Tuesday: go back to last Thursday
-		cutoffTime = now.AddDate(0, 0, -5)
-	case time.Wednesday:
-		// Wednesday: go back to last Friday
-		cutoffTime = now.AddDate(0, 0, -5)
-	case time.Thursday:
-		// Thursday: go back to last Monday
-		cutoffTime = now.AddDate(0, 0, -3)
-	case time.Friday:
-		// Friday: go back to last Tuesday
-		cutoffTime = now.AddDate(0, 0, -3)
-	case time.Saturday:
-		// Saturday: go back to last Thursday
-		cutoffTime = now.AddDate(0, 0, -2)
-	case time.Sunday:
-		// Sunday: go back to last Thursday
-		cutoffTime = now.AddDate(0, 0, -3)
-	}
-
 	reminderMutex.Lock()
 	defer reminderMutex.Unlock()
 
 	removedCount := 0
 	for issueKey, reminder := range qaReminders {
-		if !reminder.CompletedTime.IsZero() && reminder.LastSentTime.Before(cutoffTime) {
+		// Remove all completed reminders
+		if !reminder.CompletedTime.IsZero() {
 			delete(qaReminders, issueKey)
 			removedCount++
-			log.Printf("INFO: Removed completed reminder for %s (completed on %s)", issueKey, reminder.LastSentTime.Format("2006-01-02 15:04"))
+
+			// Also remove from database
+			if dbInstance := db.GetDB(); dbInstance != nil {
+				if err := dbInstance.DeleteReminder(issueKey); err != nil {
+					log.Printf("WARN: Failed to delete reminder %s from database: %v", issueKey, err)
+				}
+			}
+
+			log.Printf("INFO: Removed completed reminder for %s (completed on %s)", issueKey, reminder.CompletedTime.Format("2006-01-02 15:04"))
 		}
 	}
 
-	log.Printf("INFO: Cleanup complete. Removed %d completed reminders older than 2 business days", removedCount)
+	log.Printf("INFO: Cleanup complete. Removed %d completed reminders", removedCount)
 	return nil
 }
 
@@ -2463,6 +2550,14 @@ func checkAndMarkDailyMessage(email string) bool {
 
 	// Mark message as sent today
 	dailyMessagesSent[email] = today
+
+	// Save to database
+	if dbInstance := db.GetDB(); dbInstance != nil {
+		if err := dbInstance.SaveDailyMessage(email, today); err != nil {
+			log.Printf("WARN: Failed to save daily message to database: %v", err)
+		}
+	}
+
 	return true
 }
 
@@ -2479,4 +2574,65 @@ func cleanupOldDailyMessages() {
 			delete(dailyMessagesSent, email)
 		}
 	}
+	// Also remove from database
+	if dbInstance := db.GetDB(); dbInstance != nil {
+		if err := dbInstance.DeleteOldDailyMessages(today); err != nil {
+			log.Printf("WARN: Failed to delete old daily messages from database: %v", err)
+		}
+	}
+}
+
+// loadAllFromDB loads all data from database into memory
+func loadAllFromDB() error {
+	dbInstance := db.GetDB()
+	if dbInstance == nil || !dbInstance.IsAvailable() {
+		return fmt.Errorf("database not initialized")
+	}
+
+	// Load reminders
+	reminders, err := dbInstance.LoadAllReminders()
+	if err != nil {
+		return fmt.Errorf("failed to load reminders: %w", err)
+	}
+
+	reminderMutex.Lock()
+	for _, r := range reminders {
+		qaReminders[r.IssueKey] = &QAReminder{
+			IssueKey:       r.IssueKey,
+			QAName:         r.QAName,
+			QAEmail:        r.QAEmail,
+			MessageID:      r.MessageID,
+			SentTime:       r.SentTime,
+			LastSentTime:   r.LastSentTime,
+			ReminderNumber: r.ReminderNumber,
+			Summary:        r.Summary,
+			IssueType:      r.IssueType,
+			ButtonStatus:   r.ButtonStatus,
+			UpdatedTime:    r.UpdatedTime,
+			CompletedTime:  r.CompletedTime,
+		}
+	}
+	reminderMutex.Unlock()
+
+	// Load reminder counts
+	counts, err := dbInstance.LoadAllReminderCounts()
+	if err != nil {
+		return fmt.Errorf("failed to load reminder counts: %w", err)
+	}
+
+	qaCountMutex.Lock()
+	maps.Copy(qaReminderCounts, counts)
+	qaCountMutex.Unlock()
+
+	// Load daily messages
+	messages, err := dbInstance.LoadAllDailyMessages()
+	if err != nil {
+		return fmt.Errorf("failed to load daily messages: %w", err)
+	}
+
+	dailyMessageMutex.Lock()
+	maps.Copy(dailyMessagesSent, messages)
+	dailyMessageMutex.Unlock()
+
+	return nil
 }
