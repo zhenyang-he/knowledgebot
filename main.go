@@ -347,10 +347,14 @@ func main() {
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT)
 	r := gin.New()
 
-	// Custom logger that skips callback endpoints (frequent automated requests)
+	// Custom logger that skips callback and GET health check endpoints
 	r.Use(gin.LoggerWithFormatter(func(param gin.LogFormatterParams) string {
-		// Skip logging for callback endpoints only
+		// Skip logging for callback endpoints
 		if param.Path == "/callback" {
+			return ""
+		}
+		// Skip logging for GET /health and GET / (but log HEAD requests)
+		if (param.Path == "/health" || param.Path == "/") && param.Method == "GET" {
 			return ""
 		}
 		// Simplified format: IP, Method, Path, Status, Latency, UserAgent
