@@ -222,6 +222,18 @@ var (
 
 // Generate the knowledge base status list message
 func generateKnowledgeBaseList() string {
+	// Calculate start of current week (Monday)
+	now := getSingaporeTime()
+	weekday := int(now.Weekday())
+	// Convert Sunday (0) to 7, Monday (1) to 1, etc.
+	if weekday == 0 {
+		weekday = 7
+	}
+	// Calculate days to subtract to get to Monday
+	daysToMonday := weekday - 1
+	startOfWeek := now.AddDate(0, 0, -daysToMonday)
+	startOfWeek = time.Date(startOfWeek.Year(), startOfWeek.Month(), startOfWeek.Day(), 0, 0, 0, 0, startOfWeek.Location())
+
 	// Get all reminders
 	reminderMutex.RLock()
 	var completedReminders []*QAReminder
@@ -234,8 +246,12 @@ func generateKnowledgeBaseList() string {
 		}
 
 		if !reminder.CompletedTime.IsZero() {
-			completedReminders = append(completedReminders, reminder)
+			// Only include completed reminders from this week
+			if reminder.CompletedTime.After(startOfWeek) || reminder.CompletedTime.Equal(startOfWeek) {
+				completedReminders = append(completedReminders, reminder)
+			}
 		} else {
+			// Include all pending reminders
 			pendingReminders = append(pendingReminders, reminder)
 		}
 	}
@@ -257,7 +273,7 @@ func generateKnowledgeBaseList() string {
 	var listMsg strings.Builder
 	listMsg.WriteString("📋 **Knowledge Base Status List**\n\n")
 
-	// Completed section (shows all completed reminders until next Monday cleanup)
+	// Completed section (shows only completed reminders from current week)
 	listMsg.WriteString("✅ **Completed reminders this week:**\n")
 	if len(completedByQA) == 0 {
 		listMsg.WriteString("• None\n\n")
@@ -1864,21 +1880,28 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 
 **Group Messages:**
 • "@KnowledgeBot debug" - Show group ID and debug info
+• "@KnowledgeBot list" - Show completed (this week) and all pending QA reminders
 
 **General Functions:**
-- only query member's jira tickets that have been moved past 2nd review recently within 2 working days (skip tickets with epic links)
-- will not send duplicated reminders with every trigger
-- will re-trigger in same thread with tags every 24hrs if reminder is not completed
-- cleanup (happens every month) will remove completed reminders older than 2 working days
+- Only queries Jira tickets that have been moved past 2nd review recently within 2 working days (skips tickets with epic links)
+- Will not send duplicated reminders with every trigger
+- Will re-trigger in same thread with tags every 20 hours if reminder is not completed
+- Auto-triggered every working day at 10am
+- All data is persisted to database (survives service restarts)
+
+**Cleanup Schedule:**
+- Monthly cleanup (1st of each month at 12am):
+  • Removes all completed reminders
+  • Removes main reminders older than 7 days
 
 **For Manager:**
-- can manually trigger query jira tickets via bot with "jira" or auto triggered every working day at 10am GMT+8
-- can check all pending qa reminders via bot with "list" to see all pending and completed reminders for the past and current week
+- Can manually trigger Jira ticket queries via bot with "jira"
+- Can check all pending QA reminders via bot with "list" to see all pending and completed reminders
 
 **For Members:**
-- members can see their pending reminders via bot with "status" and can complete action from there
-- members only able to click on their pending actions
-- members can switch buttons click only once`
+- Members can see their pending reminders via bot with "status" and can complete actions from there
+- Members can only click on their own pending actions
+- Members can switch buttons but can only click once`
 
 		if err := SendMessageToUser(ctx, helpMsg, reqSOP.Event.EmployeeCode); err != nil {
 			log.Printf("ERROR: Failed to send help message: %v", err)
@@ -1930,8 +1953,8 @@ func handleGroupMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 • Send me "help" privately for more commands
 
 **Interactive Features:**
-• Click Complete button to confirm knowledge base updated
-• Click Nothing to update button if knowledge base is already clean and sleek`
+• Click "Complete" button to confirm knowledge base updated
+• Click "Nothing to update" button if knowledge base is already clean and sleek`
 
 		if _, err := SendMessageToGroup(ctx, helpMsg, reqSOP.Event.GroupID); err != nil {
 			log.Printf("ERROR: Failed to send default help message to group: %v", err)
