@@ -370,9 +370,6 @@ func main() {
 	// Health check endpoint for uptime monitoring (no signature validation needed)
 	// Enhanced health check that verifies critical components
 	healthHandler := func(ctx *gin.Context) {
-		// Log health check requests
-		log.Printf("INFO: Health check request from %s (User-Agent: %s)", ctx.ClientIP(), ctx.Request.UserAgent())
-
 		healthStatus := gin.H{
 			"status": "healthy",
 			"bot":    "knowledgebot",
@@ -390,11 +387,13 @@ func main() {
 		ctx.JSON(http.StatusOK, healthStatus)
 	}
 
-	// Support GET requests for health checks
+	// Support GET and HEAD requests for health checks
 	r.GET("/health", healthHandler)
+	r.HEAD("/health", healthHandler)
 
 	// Root path handler for uptime monitors that hit "/"
 	r.GET("/", healthHandler)
+	r.HEAD("/", healthHandler)
 
 	// Callback endpoint with conditional signature validation
 	r.POST("/callback", func(ctx *gin.Context) {

@@ -10,6 +10,11 @@ if [ -f .env ]; then
     echo "   SEATALK_SIGNING_SECRET: ${SEATALK_SIGNING_SECRET:0:8}..."
     echo "   JIRA_BASE_URL: $JIRA_BASE_URL"
     echo "   JIRA_USERNAME: $JIRA_USERNAME"
+    if [ -n "$DATABASE_URL" ]; then
+        echo "   DATABASE_URL: ${DATABASE_URL:0:30}... (hidden)"
+    else
+        echo "   DATABASE_URL: (not set - using in-memory only)"
+    fi
 else
     echo "❌ Error: .env file not found!"
     exit 1
