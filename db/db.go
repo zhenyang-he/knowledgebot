@@ -118,6 +118,11 @@ type QAReminder struct {
 	CompletedTime  time.Time
 }
 
+// truncateToSeconds truncates time to seconds (removes nanoseconds)
+func truncateToSeconds(t time.Time) time.Time {
+	return t.Truncate(time.Second)
+}
+
 // SaveReminder saves a reminder to the database
 func (db *DB) SaveReminder(reminder *QAReminder) error {
 	if !db.IsAvailable() {
@@ -146,14 +151,14 @@ func (db *DB) SaveReminder(reminder *QAReminder) error {
 		reminder.QAName,
 		reminder.QAEmail,
 		reminder.MessageID,
-		reminder.SentTime,
-		reminder.LastSentTime,
+		truncateToSeconds(reminder.SentTime),
+		truncateToSeconds(reminder.LastSentTime),
 		reminder.ReminderNumber,
 		reminder.Summary,
 		reminder.IssueType,
 		reminder.ButtonStatus,
-		reminder.UpdatedTime,
-		reminder.CompletedTime,
+		truncateToSeconds(reminder.UpdatedTime),
+		truncateToSeconds(reminder.CompletedTime),
 	)
 
 	return err
@@ -205,7 +210,7 @@ func (db *DB) SaveMainReminder(reminder *QAReminder) error {
 		reminder.IssueKey,
 		reminder.QAEmail,
 		reminder.MessageID,
-		reminder.SentTime,
+		truncateToSeconds(reminder.SentTime),
 	)
 
 	return err

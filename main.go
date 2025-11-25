@@ -1296,15 +1296,17 @@ func processQAReminders(isSilent bool) (int, error) {
 	// Get group members
 	members := getGroupMembers()
 	totalSent := 0
-	errorCount := 0
 	memberTicketCounts := make(map[string]int) // Track ticket counts per member
 
-	for _, member := range members {
+	for i, member := range members {
 		// Search for Jira tickets assigned to this QA
 		tickets, err := searchJiraQATickets(member.Email)
 		if err != nil {
 			log.Printf("ERROR: Failed to search Jira tickets for %s: %v", member.DisplayName, err)
-			errorCount++
+			// Exit early if the first person's Jira call failed
+			if i == 0 {
+				return totalSent, fmt.Errorf("failed to search Jira tickets for first member %s: %w", member.DisplayName, err)
+			}
 			continue
 		}
 		log.Printf("INFO: Processing %d pre-filtered tickets for QA %s", len(tickets), member.Email)
@@ -1389,16 +1391,31 @@ func processQAReminders(isSilent bool) (int, error) {
 			continue
 		}
 
-		// Send main reminder (QA field only, no buttons)
-		mainMessageID, err := sendMainQAReminder(member, len(eligibleTickets), isSilent)
-		if err != nil {
-			log.Printf("ERROR: Failed to send main QA reminder to %s: %v", member.DisplayName, err)
-			continue
-		}
+		// Check if main reminder already exists for today
+		today := getSingaporeTime().Format("2006-01-02")
+		mainKey := fmt.Sprintf("main_%s_%s", member.Email, today)
+		reminderMutex.RLock()
+		existingMainReminder := qaReminders[mainKey]
+		reminderMutex.RUnlock()
 
-		// Send instructions as thread reply
-		if err := sendInstructionsAsThreadReply(groupID, mainMessageID); err != nil {
-			log.Printf("ERROR: Failed to send instructions thread reply: %v", err)
+		var mainMessageID string
+		if existingMainReminder != nil {
+			// Main reminder already exists, reuse its thread
+			mainMessageID = existingMainReminder.MessageID
+			log.Printf("INFO: Reusing existing main reminder thread for %s (message ID: %s)", member.DisplayName, mainMessageID)
+		} else {
+			// Send new main reminder (QA field only, no buttons)
+			var err error
+			mainMessageID, err = sendMainQAReminder(member, len(eligibleTickets), isSilent)
+			if err != nil {
+				log.Printf("ERROR: Failed to send main QA reminder to %s: %v", member.DisplayName, err)
+				continue
+			}
+
+			// Send instructions as thread reply
+			if err := sendInstructionsAsThreadReply(groupID, mainMessageID); err != nil {
+				log.Printf("ERROR: Failed to send instructions thread reply: %v", err)
+			}
 		}
 
 		// Send individual ticket reminders as thread replies
@@ -1434,11 +1451,6 @@ func processQAReminders(isSilent bool) (int, error) {
 			memberTicketCounts[member.DisplayName] = sentCount
 		}
 		totalSent += sentCount
-	}
-
-	// If all members had errors, return an error
-	if errorCount > 0 && errorCount == len(members) {
-		return totalSent, fmt.Errorf("failed to query Jira for all team members")
 	}
 
 	// Send summary message at the end of the day (only if not silent and reminders were sent)
@@ -1490,7 +1502,9 @@ func processFollowUpReminders() (int, error) {
 	eligibleReminders := make([]*QAReminder, 0)
 	for _, reminder := range reminders {
 		// Skip completed reminders
+		// Check if CompletedTime is zero (0001-01-01 00:00:00 means not completed)
 		if !reminder.CompletedTime.IsZero() {
+			log.Printf("DEBUG: Skipping follow-up for %s - already completed at %s", reminder.IssueKey, reminder.CompletedTime.Format("2006-01-02 15:04:05"))
 			continue
 		}
 
@@ -1500,8 +1514,12 @@ func processFollowUpReminders() (int, error) {
 		}
 
 		// Check if 20 hours have passed since last reminder
-		if now.Sub(reminder.LastSentTime) >= 20*time.Hour {
+		timeSinceLastSent := now.Sub(reminder.LastSentTime)
+		if timeSinceLastSent >= 20*time.Hour {
 			eligibleReminders = append(eligibleReminders, reminder)
+			log.Printf("DEBUG: Eligible follow-up for %s - %.1f hours since last sent", reminder.IssueKey, timeSinceLastSent.Hours())
+		} else {
+			log.Printf("DEBUG: Skipping follow-up for %s - only %.1f hours since last sent (need 20 hours)", reminder.IssueKey, timeSinceLastSent.Hours())
 		}
 	}
 
