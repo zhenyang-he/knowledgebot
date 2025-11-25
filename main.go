@@ -1502,9 +1502,7 @@ func processFollowUpReminders() (int, error) {
 	eligibleReminders := make([]*QAReminder, 0)
 	for _, reminder := range reminders {
 		// Skip completed reminders
-		// Check if CompletedTime is zero (0001-01-01 00:00:00 means not completed)
 		if !reminder.CompletedTime.IsZero() {
-			log.Printf("DEBUG: Skipping follow-up for %s - already completed at %s", reminder.IssueKey, reminder.CompletedTime.Format("2006-01-02 15:04:05"))
 			continue
 		}
 
@@ -1517,9 +1515,6 @@ func processFollowUpReminders() (int, error) {
 		timeSinceLastSent := now.Sub(reminder.LastSentTime)
 		if timeSinceLastSent >= 20*time.Hour {
 			eligibleReminders = append(eligibleReminders, reminder)
-			log.Printf("DEBUG: Eligible follow-up for %s - %.1f hours since last sent", reminder.IssueKey, timeSinceLastSent.Hours())
-		} else {
-			log.Printf("DEBUG: Skipping follow-up for %s - only %.1f hours since last sent (need 20 hours)", reminder.IssueKey, timeSinceLastSent.Hours())
 		}
 	}
 
@@ -2607,6 +2602,22 @@ func getSingaporeTime() time.Time {
 	return time.Now().In(location)
 }
 
+// toSingaporeTime converts a time to Singapore timezone
+func toSingaporeTime(t time.Time) time.Time {
+	if t.IsZero() {
+		return t
+	}
+	location, err := time.LoadLocation("Asia/Singapore")
+	if err != nil {
+		return t.UTC()
+	}
+	// Check if already in Singapore timezone
+	if t.Location().String() == location.String() {
+		return t
+	}
+	return t.In(location)
+}
+
 // parseJiraUpdateTime parses Jira update time string and converts to Singapore time
 func parseJiraUpdateTime(updatedStr string) time.Time {
 	if updatedStr == "" {
@@ -2699,14 +2710,14 @@ func loadAllFromDB() error {
 			QAName:         r.QAName,
 			QAEmail:        r.QAEmail,
 			MessageID:      r.MessageID,
-			SentTime:       r.SentTime,
-			LastSentTime:   r.LastSentTime,
+			SentTime:       toSingaporeTime(r.SentTime),
+			LastSentTime:   toSingaporeTime(r.LastSentTime),
 			ReminderNumber: r.ReminderNumber,
 			Summary:        r.Summary,
 			IssueType:      r.IssueType,
 			ButtonStatus:   r.ButtonStatus,
-			UpdatedTime:    r.UpdatedTime,
-			CompletedTime:  r.CompletedTime,
+			UpdatedTime:    toSingaporeTime(r.UpdatedTime),
+			CompletedTime:  toSingaporeTime(r.CompletedTime),
 		}
 	}
 	reminderMutex.Unlock()
@@ -2719,20 +2730,12 @@ func loadAllFromDB() error {
 
 	reminderMutex.Lock()
 	for _, r := range mainReminders {
-		// Main reminders only store essential fields, set defaults for others
+		// Main reminders only store essential fields for threading
 		qaReminders[r.IssueKey] = &QAReminder{
-			IssueKey:       r.IssueKey,
-			QAName:         formatEmailAsName(r.QAEmail), // Derive name from email
-			QAEmail:        r.QAEmail,
-			MessageID:      r.MessageID,
-			SentTime:       r.SentTime,
-			LastSentTime:   r.SentTime, // Use sent_time as last_sent_time
-			ReminderNumber: 0,          // Main reminders don't have numbers
-			Summary:        "",         // Not applicable
-			IssueType:      "",         // Not applicable
-			ButtonStatus:   "",         // Not applicable
-			UpdatedTime:    r.SentTime,
-			CompletedTime:  time.Time{}, // Never completed
+			IssueKey:  r.IssueKey,
+			QAEmail:   r.QAEmail,
+			MessageID: r.MessageID,
+			SentTime:  toSingaporeTime(r.SentTime),
 		}
 	}
 	reminderMutex.Unlock()
