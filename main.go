@@ -1299,12 +1299,16 @@ func processQAReminders(isSilent bool) (int, error) {
 	errorCount := 0
 	memberTicketCounts := make(map[string]int) // Track ticket counts per member
 
-	for _, member := range members {
+	for i, member := range members {
 		// Search for Jira tickets assigned to this QA
 		tickets, err := searchJiraQATickets(member.Email)
 		if err != nil {
 			log.Printf("ERROR: Failed to search Jira tickets for %s: %v", member.DisplayName, err)
 			errorCount++
+			// Exit early if the first person's Jira call failed
+			if i == 0 {
+				return totalSent, fmt.Errorf("failed to search Jira tickets for first member %s: %w", member.DisplayName, err)
+			}
 			continue
 		}
 		log.Printf("INFO: Processing %d pre-filtered tickets for QA %s", len(tickets), member.Email)
