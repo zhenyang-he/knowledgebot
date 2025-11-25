@@ -2307,12 +2307,19 @@ func markQAReminderCompleted(ticketKey, buttonStatus string, event Event) {
 
 	// Find the QA reminder by ticket key
 	if reminder, exists := qaReminders[ticketKey]; exists {
+		// Check if already completed - only decrement count if this is the first time completing
+		wasAlreadyCompleted := !reminder.CompletedTime.IsZero()
+
 		reminder.ButtonStatus = buttonStatus
 		reminder.CompletedTime = getSingaporeTime() // Set the actual completion time
 
 		// Log who completed it with employee code
 		displayName := getEmployeeDisplayNameWithCode(event)
-		log.Printf("INFO: QA reminder for %s marked as completed by %s with status: %s", ticketKey, displayName, buttonStatus)
+		if wasAlreadyCompleted {
+			log.Printf("INFO: QA reminder for %s was already completed, updating status to %s by %s", ticketKey, buttonStatus, displayName)
+		} else {
+			log.Printf("INFO: QA reminder for %s marked as completed by %s with status: %s", ticketKey, displayName, buttonStatus)
+		}
 
 		// Save to database
 		if dbInstance := db.GetDB(); dbInstance != nil {
@@ -2335,8 +2342,11 @@ func markQAReminderCompleted(ticketKey, buttonStatus string, event Event) {
 			}
 		}
 
-		// Decrease the reminder count for this QA
-		decreaseReminderCount(reminder.QAEmail)
+		// Decrease the reminder count for this QA only if it wasn't already completed
+		// This prevents double-decrementing when user switches button clicks (e.g., complete then cancel)
+		if !wasAlreadyCompleted {
+			decreaseReminderCount(reminder.QAEmail)
+		}
 	} else {
 		log.Printf("WARN: No reminder found for ticket %s when trying to mark as completed", ticketKey)
 	}
