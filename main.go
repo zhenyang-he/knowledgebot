@@ -1296,7 +1296,6 @@ func processQAReminders(isSilent bool) (int, error) {
 	// Get group members
 	members := getGroupMembers()
 	totalSent := 0
-	errorCount := 0
 	memberTicketCounts := make(map[string]int) // Track ticket counts per member
 
 	for i, member := range members {
@@ -1304,7 +1303,6 @@ func processQAReminders(isSilent bool) (int, error) {
 		tickets, err := searchJiraQATickets(member.Email)
 		if err != nil {
 			log.Printf("ERROR: Failed to search Jira tickets for %s: %v", member.DisplayName, err)
-			errorCount++
 			// Exit early if the first person's Jira call failed
 			if i == 0 {
 				return totalSent, fmt.Errorf("failed to search Jira tickets for first member %s: %w", member.DisplayName, err)
@@ -1438,11 +1436,6 @@ func processQAReminders(isSilent bool) (int, error) {
 			memberTicketCounts[member.DisplayName] = sentCount
 		}
 		totalSent += sentCount
-	}
-
-	// If all members had errors, return an error
-	if errorCount > 0 && errorCount == len(members) {
-		return totalSent, fmt.Errorf("failed to query Jira for all team members")
 	}
 
 	// Send summary message at the end of the day (only if not silent and reminders were sent)
