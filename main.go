@@ -335,6 +335,53 @@ func generateKnowledgeBaseList() string {
 	return listMsg.String()
 }
 
+func generateReminderCounts() string {
+	qaCountMutex.RLock()
+	defer qaCountMutex.RUnlock()
+
+	members := getGroupMembers()
+
+	// Build the count message
+	var countMsg strings.Builder
+	countMsg.WriteString("📊 **Current Reminder Counts**\n\n")
+
+	// Sort members by display name for consistent output
+	type qaCount struct {
+		name  string
+		email string
+		count int
+	}
+	var counts []qaCount
+
+	for _, member := range members {
+		count := qaReminderCounts[member.Email]
+		counts = append(counts, qaCount{
+			name:  member.DisplayName,
+			email: member.Email,
+			count: count,
+		})
+	}
+
+	// Sort by name
+	sort.Slice(counts, func(i, j int) bool {
+		return counts[i].name < counts[j].name
+	})
+
+	// Display counts
+	for _, qc := range counts {
+		countMsg.WriteString(fmt.Sprintf("**%s:** %d\n", qc.name, qc.count))
+	}
+
+	// Calculate total
+	total := 0
+	for _, qc := range counts {
+		total += qc.count
+	}
+	countMsg.WriteString(fmt.Sprintf("\n**Total:** %d", total))
+
+	return countMsg.String()
+}
+
 func main() {
 	// Initialize database connection (optional - will continue without DB if not configured)
 	if err := db.Init(); err != nil {
@@ -1801,6 +1848,14 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 			log.Printf("ERROR: Failed to send list message: %v", err)
 		}
 
+	case strings.Contains(messageLower, "count"):
+		// Generate the reminder counts
+		countMsg := generateReminderCounts()
+
+		if err := SendMessageToUser(ctx, countMsg, reqSOP.Event.EmployeeCode); err != nil {
+			log.Printf("ERROR: Failed to send count message: %v", err)
+		}
+
 	case strings.Contains(messageLower, "status"):
 		log.Printf("INFO: Status command received from: %s", getEmployeeDisplayNameWithCode(reqSOP.Event))
 
@@ -1924,6 +1979,7 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 • "help" - Show this help message
 • "debug" - Show debug information
 • "list" - View all completed and pending reminders for the team
+• "count" - View current reminder counts for all team members
 • "status" - View all your pending QA reminders with action buttons
 • "jira" - Manually trigger QA Jira queries check
 • "sjira" - Silent testing mode (check Jira without sending notifications)
@@ -1931,6 +1987,7 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 **Group Messages:**
 • "@KnowledgeBot debug" - Show group ID and debug info
 • "@KnowledgeBot list" - Show completed (this week) and all pending QA reminders
+• "@KnowledgeBot count" - Show current reminder counts for all team members
 
 **General Functions:**
 - Only queries Jira tickets that have been moved past 2nd review recently within 2 working days (skips tickets with epic links)
@@ -1991,12 +2048,21 @@ func handleGroupMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 		if _, err := SendMessageToGroup(ctx, listMsg, reqSOP.Event.GroupID); err != nil {
 			log.Printf("ERROR: Failed to send list message to group: %v", err)
 		}
+
+	case strings.Contains(messageLower, "count"):
+		// Generate the reminder counts
+		countMsg := generateReminderCounts()
+
+		if _, err := SendMessageToGroup(ctx, countMsg, reqSOP.Event.GroupID); err != nil {
+			log.Printf("ERROR: Failed to send count message to group: %v", err)
+		}
 	default:
 		// Respond to unrecognized commands with available options
 		helpMsg := `🤖 **Knowledge Base Bot Commands**
 
 **Available Commands:**
 • "@KnowledgeBot list" - Show completed (this week) and all pending QA reminders
+• "@KnowledgeBot count" - Show current reminder counts for all team members
 • "@KnowledgeBot debug" - Show group ID and debug info
 
 **Private Commands:**
