@@ -1278,8 +1278,10 @@ func startQAReminder() {
 			}
 
 			// Also check for 24-hour follow-ups
-			if err := processFollowUpReminders(); err != nil {
+			if followUpCount, err := processFollowUpReminders(); err != nil {
 				log.Printf("ERROR: Failed to process follow-up reminders: %v", err)
+			} else if followUpCount > 0 {
+				log.Printf("INFO: Processed %d follow-up reminders", followUpCount)
 			}
 
 			// Sleep for a minute to avoid running multiple times
@@ -1343,8 +1345,6 @@ func processQAReminders(isSilent bool) (int, error) {
 						oneMonth := 30 * 24 * time.Hour // Approximate 1 month
 						if gap > oneMonth {
 							skippedOldDueDates = append(skippedOldDueDates, ticket.Key)
-							log.Printf("DEBUG: Skipping ticket %s: QA Due Date (%s) is more than 1 month before Updated time (%s), gap: %v",
-								ticket.Key, qaDueDate.Format("2006-01-02"), updatedTime.Format("2006-01-02 15:04:05"), gap)
 							continue
 						}
 					}
@@ -1474,7 +1474,7 @@ func processQAReminders(isSilent bool) (int, error) {
 	return totalSent, nil
 }
 
-func processFollowUpReminders() error {
+func processFollowUpReminders() (int, error) {
 	reminderMutex.RLock()
 	reminders := make([]*QAReminder, 0, len(qaReminders))
 	for _, reminder := range qaReminders {
@@ -1574,7 +1574,7 @@ func processFollowUpReminders() error {
 		}
 	}
 
-	return nil
+	return totalSent, nil
 }
 
 func sendFollowUpReminder(ticket JiraIssue, qa GroupMember) error {
@@ -1830,17 +1830,24 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 			}
 		} else {
 			// Also process follow-up reminders in silent mode
-			if err := processFollowUpReminders(); err != nil {
+			followUpCount := 0
+			if count, err := processFollowUpReminders(); err != nil {
 				log.Printf("ERROR: Failed to process follow-up reminders in silent mode: %v", err)
+			} else {
+				followUpCount = count
 			}
 
 			var confirmMsg string
-			if sentCount == 0 {
+			if sentCount == 0 && followUpCount == 0 {
 				confirmMsg = "🔇 **Silent Testing Mode** - No new reminders found. All eligible tickets already have reminders."
 				log.Printf("INFO: Silent Jira testing completed - no new reminders found")
 			} else {
-				confirmMsg = fmt.Sprintf("🔇 **Silent Testing Mode** - Found %d eligible ticket(s) that would have triggered reminders.\n\n**Note:** No notifications were sent to the group.", sentCount)
-				log.Printf("INFO: Silent Jira testing completed - %d eligible tickets found", sentCount)
+				confirmMsg = fmt.Sprintf("🔇 **Silent Testing Mode** - Found %d eligible ticket(s) that would have triggered reminders.", sentCount)
+				if followUpCount > 0 {
+					confirmMsg += fmt.Sprintf("\n📋 **Follow-up reminders:** %d reminder(s) sent.", followUpCount)
+				}
+				confirmMsg += "\n\n**Note:** No notifications were sent to the group."
+				log.Printf("INFO: Silent Jira testing completed - %d eligible tickets found, %d follow-up reminders sent", sentCount, followUpCount)
 			}
 
 			if err := SendMessageToUser(ctx, confirmMsg, reqSOP.Event.EmployeeCode); err != nil {
@@ -1860,17 +1867,24 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 			}
 		} else {
 			// Also process follow-up reminders
-			if err := processFollowUpReminders(); err != nil {
+			followUpCount := 0
+			if count, err := processFollowUpReminders(); err != nil {
 				log.Printf("ERROR: Failed to process follow-up reminders: %v", err)
+			} else {
+				followUpCount = count
 			}
 
 			var confirmMsg string
-			if sentCount == 0 {
+			if sentCount == 0 && followUpCount == 0 {
 				confirmMsg = "ℹ️ No new reminders to send. All eligible tickets already have reminders."
 				log.Printf("INFO: Manual QA reminder check completed - no new reminders sent")
 			} else {
-				confirmMsg = fmt.Sprintf("✅ Successfully sent %d new QA reminder(s)! Check the group for the reminders.", sentCount)
-				log.Printf("INFO: Manual QA reminder processing completed - %d reminders sent", sentCount)
+				confirmMsg = fmt.Sprintf("✅ Successfully sent %d new QA reminder(s)!", sentCount)
+				if followUpCount > 0 {
+					confirmMsg += fmt.Sprintf("\n📋 **Follow-up reminders:** %d reminder(s) sent.", followUpCount)
+				}
+				confirmMsg += "\n\nCheck the group for the reminders."
+				log.Printf("INFO: Manual QA reminder processing completed - %d reminders sent, %d follow-up reminders sent", sentCount, followUpCount)
 			}
 
 			if err := SendMessageToUser(ctx, confirmMsg, reqSOP.Event.EmployeeCode); err != nil {
