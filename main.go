@@ -2003,7 +2003,8 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 
 **For Manager:**
 - Can manually trigger Jira ticket queries via bot with "jira"
-- Can check all pending QA reminders via bot with "list" to see all pending and completed reminders
+- Can check all pending and completed QA reminders via bot with "list"
+- Can check all reminder counts by each QA via bot with "count"
 
 **For Members:**
 - Members can see their pending reminders via bot with "status" and can complete actions from there
