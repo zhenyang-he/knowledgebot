@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -458,7 +459,7 @@ func main() {
 			handleGroupMessage(ctx, reqSOP)
 			ctx.JSON(http.StatusOK, "Success")
 		case "user_enter_chatroom_with_bot":
-			log.Printf("DEBUG: User entered chatroom - %s", getEmployeeDisplayName(reqSOP.Event))
+			log.Printf("DEBUG: User entered chatroom - %s", getEmployeeDisplayNameWithCode(reqSOP.Event))
 		default:
 			log.Printf("event %s not handled yet!", reqSOP.EventType)
 			ctx.JSON(http.StatusOK, "Success")
@@ -1748,7 +1749,7 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 		message = reqSOP.Event.Message.Text.PlainText
 	}
 
-	displayName := getEmployeeDisplayName(reqSOP.Event)
+	displayName := getEmployeeDisplayNameWithCode(reqSOP.Event)
 	log.Printf("INFO: private message received: %s, from: %s", message, displayName)
 
 	messageLower := strings.ToLower(message)
@@ -1776,7 +1777,7 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 		}
 
 	case strings.Contains(messageLower, "status"):
-		log.Printf("INFO: Status command received from: %s", displayName)
+		log.Printf("INFO: Status command received from: %s", getEmployeeDisplayNameWithCode(reqSOP.Event))
 
 		// Get all incomplete reminders for this user
 		reminderMutex.RLock()
@@ -1818,7 +1819,7 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 		}
 
 	case strings.Contains(messageLower, "sjira"):
-		log.Printf("INFO: Silent Jira testing mode triggered by: %s", displayName)
+		log.Printf("INFO: Silent Jira testing mode triggered by: %s", getEmployeeDisplayNameWithCode(reqSOP.Event))
 
 		sentCount, err := processQAReminders(true)
 		if err != nil {
@@ -1848,7 +1849,7 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 		}
 
 	case strings.Contains(messageLower, "jira"):
-		log.Printf("INFO: Manual QA reminder trigger detected from: %s", displayName)
+		log.Printf("INFO: Manual QA reminder trigger detected from: %s", getEmployeeDisplayNameWithCode(reqSOP.Event))
 
 		sentCount, err := processQAReminders(false)
 		if err != nil {
@@ -2006,12 +2007,12 @@ func handleButtonClick(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 	userResponses := alertResponses[messageID][reqSOP.Event.EmployeeCode]
 
 	// Check if user has already pressed both buttons
-	hasComplete := contains(userResponses, "complete")
-	hasCancel := contains(userResponses, "cancel")
+	hasComplete := slices.Contains(userResponses, "complete")
+	hasCancel := slices.Contains(userResponses, "cancel")
 
 	if hasComplete && hasCancel {
 		responseMutex.Unlock()
-		displayName := getEmployeeDisplayName(reqSOP.Event)
+		displayName := getEmployeeDisplayNameWithCode(reqSOP.Event)
 		log.Printf("INFO: User %s has already used both buttons for alert %s, blocking further clicks", displayName, ticketKey)
 
 		// Send private message to inform the user
@@ -2023,9 +2024,9 @@ func handleButtonClick(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 	}
 
 	// Check if user is clicking the same button again
-	if contains(userResponses, buttonType) {
+	if slices.Contains(userResponses, buttonType) {
 		responseMutex.Unlock()
-		displayName := getEmployeeDisplayName(reqSOP.Event)
+		displayName := getEmployeeDisplayNameWithCode(reqSOP.Event)
 		log.Printf("INFO: User %s already clicked %s button for alert %s, ignoring duplicate", displayName, buttonType, ticketKey)
 
 		// Send private message to inform the user
@@ -2110,12 +2111,11 @@ func handleButtonClick(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 		buttonStatus = "nothing_to_update"
 	}
 
-	// Mark QA reminder as completed for both button types
-	markQAReminderCompleted(ticketKey, buttonStatus)
+	markQAReminderCompleted(ticketKey, buttonStatus, reqSOP.Event)
 }
 
 func handleKnowledgeBaseComplete(ctx *gin.Context, event Event, groupID, threadID string, isSecondButton bool, ticketKey string) {
-	displayName := getEmployeeDisplayName(event)
+	displayName := getEmployeeDisplayNameWithCode(event)
 	completedTime := getSingaporeTime()
 
 	// Find the reminder for this specific ticket to get the sent time and issue type
@@ -2178,7 +2178,7 @@ func handleKnowledgeBaseComplete(ctx *gin.Context, event Event, groupID, threadI
 }
 
 func handleKnowledgeBaseCancel(ctx *gin.Context, event Event, groupID, threadID string, isSecondButton bool, ticketKey string) {
-	displayName := getEmployeeDisplayName(event)
+	displayName := getEmployeeDisplayNameWithCode(event)
 	cancelledTime := getSingaporeTime()
 
 	// Find the reminder for this specific ticket to get the sent time and issue type
@@ -2237,7 +2237,7 @@ func handleKnowledgeBaseCancel(ctx *gin.Context, event Event, groupID, threadID 
 	}
 }
 
-func markQAReminderCompleted(ticketKey, buttonStatus string) {
+func markQAReminderCompleted(ticketKey, buttonStatus string, event Event) {
 	reminderMutex.Lock()
 	defer reminderMutex.Unlock()
 
@@ -2246,8 +2246,8 @@ func markQAReminderCompleted(ticketKey, buttonStatus string) {
 		reminder.ButtonStatus = buttonStatus
 		reminder.CompletedTime = getSingaporeTime() // Set the actual completion time
 
-		// Use the QA email from the reminder to get proper display name
-		displayName := formatEmailAsName(reminder.QAEmail)
+		// Log who completed it with employee code
+		displayName := getEmployeeDisplayNameWithCode(event)
 		log.Printf("INFO: QA reminder for %s marked as completed by %s with status: %s", ticketKey, displayName, buttonStatus)
 
 		// Save to database
@@ -2364,6 +2364,15 @@ func getEmployeeDisplayName(event Event) string {
 
 	// Fallback to employee code
 	return event.EmployeeCode
+}
+
+// getEmployeeDisplayNameWithCode returns display name with employee code in format "DisplayName (EmployeeCode)"
+func getEmployeeDisplayNameWithCode(event Event) string {
+	displayName := getEmployeeDisplayName(event)
+	if event.EmployeeCode != "" {
+		return fmt.Sprintf("%s (%s)", displayName, event.EmployeeCode)
+	}
+	return displayName
 }
 
 func formatEmailAsName(email string) string {
@@ -2527,16 +2536,6 @@ func getEnvOrDefault(key, defaultValue string) string {
 		return defaultValue
 	}
 	return value
-}
-
-// Helper function to check if slice contains a string
-func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
-	}
-	return false
 }
 
 // getSingaporeTime returns current time in Singapore timezone (GMT+8)
