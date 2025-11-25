@@ -1828,6 +1828,11 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 				log.Printf("ERROR: Failed to send error message: %v", err)
 			}
 		} else {
+			// Also process follow-up reminders in silent mode
+			if err := processFollowUpReminders(); err != nil {
+				log.Printf("ERROR: Failed to process follow-up reminders in silent mode: %v", err)
+			}
+
 			var confirmMsg string
 			if sentCount == 0 {
 				confirmMsg = "🔇 **Silent Testing Mode** - No new reminders found. All eligible tickets already have reminders."
@@ -1853,6 +1858,11 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 				log.Printf("ERROR: Failed to send error message: %v", err)
 			}
 		} else {
+			// Also process follow-up reminders
+			if err := processFollowUpReminders(); err != nil {
+				log.Printf("ERROR: Failed to process follow-up reminders: %v", err)
+			}
+
 			var confirmMsg string
 			if sentCount == 0 {
 				confirmMsg = "ℹ️ No new reminders to send. All eligible tickets already have reminders."
