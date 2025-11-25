@@ -460,6 +460,8 @@ func main() {
 			ctx.JSON(http.StatusOK, "Success")
 		case "user_enter_chatroom_with_bot":
 			log.Printf("DEBUG: User entered chatroom - %s", getEmployeeDisplayNameWithCode(reqSOP.Event))
+		case "new_message_received_from_thread":
+			ctx.JSON(http.StatusOK, "Success")
 		default:
 			log.Printf("event %s not handled yet!", reqSOP.EventType)
 			ctx.JSON(http.StatusOK, "Success")
@@ -2115,40 +2117,43 @@ func handleButtonClick(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 	reminderMutex.RUnlock()
 
 	// Process the button click
-	var buttonStatus string
 	switch buttonType {
 	case "complete":
+		// Mark as completed first so CompletedTime is available for response time calculation
+		markQAReminderCompleted(ticketKey, "completed", reqSOP.Event)
 		handleKnowledgeBaseComplete(ctx, reqSOP.Event, targetGroupID, threadID, isSecondButton, ticketKey)
-		buttonStatus = "completed"
 	case "cancel":
+		// Mark as completed first so CompletedTime is available for response time calculation
+		markQAReminderCompleted(ticketKey, "nothing_to_update", reqSOP.Event)
 		handleKnowledgeBaseCancel(ctx, reqSOP.Event, targetGroupID, threadID, isSecondButton, ticketKey)
-		buttonStatus = "nothing_to_update"
 	}
-
-	markQAReminderCompleted(ticketKey, buttonStatus, reqSOP.Event)
 }
 
 func handleKnowledgeBaseComplete(ctx *gin.Context, event Event, groupID, threadID string, isSecondButton bool, ticketKey string) {
-	displayName := getEmployeeDisplayNameWithCode(event)
-	completedTime := getSingaporeTime()
+	displayName := getEmployeeDisplayName(event) // For user-facing messages (no employee code)
 
 	// Find the reminder for this specific ticket to get the sent time and issue type
 	reminderMutex.RLock()
 	var reminderSentTime time.Time
+	var completedTime time.Time
 	var ticketType string
 	if reminder, exists := qaReminders[ticketKey]; exists {
 		reminderSentTime = reminder.SentTime
+		completedTime = reminder.CompletedTime
 		ticketType = reminder.IssueType
 	}
 	reminderMutex.RUnlock()
 
-	// Calculate duration and motivational message if reminder was sent
+	// Calculate duration and motivational message using only database values
 	var durationMsg string
 	var cheerMessage string
-	if !reminderSentTime.IsZero() {
+	if !reminderSentTime.IsZero() && !completedTime.IsZero() {
 		duration := completedTime.Sub(reminderSentTime)
 		durationMsg = fmt.Sprintf("\n⏱️ **Response Time:** %s", formatDuration(duration))
 		cheerMessage = fmt.Sprintf("\n%s", getCheerMessage(duration))
+	} else {
+		// Show error if database values are missing
+		durationMsg = "\n⏱️ **Response Time:** Unable to calculate"
 	}
 
 	// Add [Updated] prefix if this is the second button press
@@ -2161,6 +2166,15 @@ func handleKnowledgeBaseComplete(ctx *gin.Context, event Event, groupID, threadI
 	jiraTicketWithTitle := fmt.Sprintf("%s/browse/%s", jiraConfig.BaseURL, ticketKey)
 
 	// Send confirmation message with timestamps
+	completedTimeStr := "N/A"
+	if !completedTime.IsZero() {
+		completedTimeStr = completedTime.Format("2006-01-02 15:04:05")
+	}
+	reminderSentTimeStr := "N/A"
+	if !reminderSentTime.IsZero() {
+		reminderSentTimeStr = reminderSentTime.Format("2006-01-02 15:04:05")
+	}
+
 	confirmMsg := fmt.Sprintf(`✅ **%sKnowledge base is updated by %s**
 
 🎫 **Jira (%s):** %s
@@ -2170,8 +2184,8 @@ func handleKnowledgeBaseComplete(ctx *gin.Context, event Event, groupID, threadI
 		displayName,
 		ticketType,
 		jiraTicketWithTitle,
-		reminderSentTime.Format("2006-01-02 15:04:05"),
-		completedTime.Format("2006-01-02 15:04:05"),
+		reminderSentTimeStr,
+		completedTimeStr,
 		durationMsg,
 		cheerMessage,
 	)
@@ -2192,24 +2206,28 @@ func handleKnowledgeBaseComplete(ctx *gin.Context, event Event, groupID, threadI
 }
 
 func handleKnowledgeBaseCancel(ctx *gin.Context, event Event, groupID, threadID string, isSecondButton bool, ticketKey string) {
-	displayName := getEmployeeDisplayNameWithCode(event)
-	cancelledTime := getSingaporeTime()
+	displayName := getEmployeeDisplayName(event) // For user-facing messages (no employee code)
 
 	// Find the reminder for this specific ticket to get the sent time and issue type
 	reminderMutex.RLock()
 	var reminderSentTime time.Time
+	var cancelledTime time.Time
 	var ticketType string
 	if reminder, exists := qaReminders[ticketKey]; exists {
 		reminderSentTime = reminder.SentTime
+		cancelledTime = reminder.CompletedTime
 		ticketType = reminder.IssueType
 	}
 	reminderMutex.RUnlock()
 
-	// Calculate duration if reminder was sent
+	// Calculate duration using only database values
 	var durationMsg string
-	if !reminderSentTime.IsZero() {
+	if !reminderSentTime.IsZero() && !cancelledTime.IsZero() {
 		duration := cancelledTime.Sub(reminderSentTime)
 		durationMsg = fmt.Sprintf("\n⏱️ **Response Time:** %s", formatDuration(duration))
+	} else {
+		// Show error if database values are missing
+		durationMsg = "\n⏱️ **Response Time:** Unable to calculate (missing timestamp data)"
 	}
 
 	// Add [Updated] prefix if this is the second button press
@@ -2222,6 +2240,15 @@ func handleKnowledgeBaseCancel(ctx *gin.Context, event Event, groupID, threadID 
 	jiraTicketWithTitle := fmt.Sprintf("%s/browse/%s", jiraConfig.BaseURL, ticketKey)
 
 	// Send cancellation message
+	cancelledTimeStr := "N/A"
+	if !cancelledTime.IsZero() {
+		cancelledTimeStr = cancelledTime.Format("2006-01-02 15:04:05")
+	}
+	reminderSentTimeStr := "N/A"
+	if !reminderSentTime.IsZero() {
+		reminderSentTimeStr = reminderSentTime.Format("2006-01-02 15:04:05")
+	}
+
 	cancelMsg := fmt.Sprintf(`🚫 **%s%s acknowledged that knowledge base does not require update for this Jira ticket**
 
 🎫 **Jira (%s):** %s
@@ -2231,8 +2258,8 @@ func handleKnowledgeBaseCancel(ctx *gin.Context, event Event, groupID, threadID 
 		displayName,
 		ticketType,
 		jiraTicketWithTitle,
-		reminderSentTime.Format("2006-01-02 15:04:05"),
-		cancelledTime.Format("2006-01-02 15:04:05"),
+		reminderSentTimeStr,
+		cancelledTimeStr,
 		durationMsg,
 	)
 
