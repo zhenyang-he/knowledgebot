@@ -1536,6 +1536,9 @@ func processFollowUpReminders(isSilent bool) (int, error) {
 			Key: reminder.IssueKey,
 			Fields: JiraFields{
 				Summary: reminder.Summary,
+				Issuetype: JiraIssuetype{
+					Name: reminder.IssueType,
+				},
 			},
 		}
 
