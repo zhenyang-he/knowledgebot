@@ -186,7 +186,8 @@ type SOPTextMsg struct {
 
 type SendMessageToUserResp struct {
 	Code      int    `json:"code"`
-	MessageID string `json:"message_id"`
+	Message   string `json:"message,omitempty"`
+	MessageID string `json:"message_id,omitempty"`
 }
 
 // Global variables
@@ -506,7 +507,7 @@ func main() {
 			handleGroupMessage(ctx, reqSOP)
 			ctx.JSON(http.StatusOK, "Success")
 		case "user_enter_chatroom_with_bot":
-			log.Printf("DEBUG: User entered chatroom - %s", getEmployeeDisplayNameWithCode(reqSOP.Event))
+			log.Printf("DEBUG: User entered chatroom - %s (%s)", getEmployeeDisplayName(reqSOP.Event), reqSOP.Event.EmployeeCode)
 		case "new_message_received_from_thread":
 			ctx.JSON(http.StatusOK, "Success")
 		default:
@@ -625,7 +626,7 @@ func GetAppAccessToken() AppAccessToken {
 			log.Printf("ERROR: SeaTalk credentials not configured. Please set SEATALK_APP_ID and SEATALK_APP_SECRET environment variables")
 			return appAccessToken
 		}
-		body := []byte(fmt.Sprintf(`{"app_id": "%s", "app_secret": "%s"}`, appID, appSecret))
+		body := fmt.Appendf(nil, `{"app_id": "%s", "app_secret": "%s"}`, appID, appSecret)
 
 		req, err := http.NewRequest("POST", "https://openapi.seatalk.io/auth/app_access_token", bytes.NewBuffer(body))
 		if err != nil {
@@ -705,7 +706,7 @@ func SendMessageToUser(ctx context.Context, message, employeeCode string) error 
 	}
 
 	if resp.Code != 0 {
-		return fmt.Errorf("something wrong, response code: %v", resp.Code)
+		return fmt.Errorf("failed to send message to user | Code: %d, Message: %s", resp.Code, resp.Message)
 	}
 
 	return nil
@@ -744,7 +745,7 @@ func SendMessageToGroup(ctx context.Context, message, groupID string) (string, e
 	}
 
 	if resp.Code != 0 {
-		return "", fmt.Errorf("failed to send group message, response code: %v", resp.Code)
+		return "", fmt.Errorf("failed to send message to group | Code: %d, Message: %s", resp.Code, resp.Message)
 	}
 
 	return resp.MessageID, nil
@@ -786,7 +787,7 @@ func SendMessageToThread(ctx context.Context, message, groupID, threadID string)
 	}
 
 	if respBody.Code != 0 {
-		return fmt.Errorf("failed to send thread message, API error code: %v", respBody.Code)
+		return fmt.Errorf("failed to send message to thread | Code: %d, Message: %s", respBody.Code, respBody.Message)
 	}
 
 	return nil
@@ -868,7 +869,7 @@ func SendInteractiveMessageToGroup(ctx context.Context, groupID, title, descript
 	}
 
 	if resp.Code != 0 {
-		return "", fmt.Errorf("failed to send interactive message, response code: %v", resp.Code)
+		return "", fmt.Errorf("failed to send interactive message to group | Code: %d, Message: %s", resp.Code, resp.Message)
 	}
 
 	return resp.MessageID, nil
@@ -1118,6 +1119,108 @@ Click the appropriate button below:`,
 		if err := dbInstance.SaveReminder(dbReminder); err != nil {
 			log.Printf("WARN: Failed to save ticket reminder to database: %v", err)
 		}
+	}
+
+	return nil
+}
+
+// Send a status reminder with interactive buttons to a user privately
+func sendStatusReminderToUser(reminder *QAReminder, employeeCode string) error {
+	// Create a temporary JiraIssue to reuse formatJiraTicketWithTitle
+	tempJiraIssue := JiraIssue{
+		Key: reminder.IssueKey,
+		Fields: JiraFields{
+			Summary: reminder.Summary,
+		},
+	}
+	jiraTicketWithTitle := formatJiraTicketWithTitle(&tempJiraIssue)
+
+	// Use stored Jira update time
+	recentlyCompletedTestingDate := reminder.UpdatedTime.Format("02 Jan 2006")
+
+	// Calculate how long ago the reminder was sent (use LastSentTime for follow-ups)
+	timeSinceSent := time.Since(reminder.LastSentTime)
+	sentAgo := formatDuration(timeSinceSent)
+
+	ticketType := reminder.IssueType
+	description := fmt.Sprintf(`**Jira (%s):** %s
+📅 **Completed Testing recently:** %s
+⏰ **Latest reminder Sent:** %s ago
+
+Click the appropriate button below:`,
+		ticketType, jiraTicketWithTitle, recentlyCompletedTestingDate, sentAgo)
+
+	// Create interactive message with buttons (include reminder number to match thread format)
+	title := fmt.Sprintf("📚 Knowledge Base Reminder %d", reminder.ReminderNumber)
+	// Use ticket key only as button ID (consistent with group reminders)
+	buttonID := reminder.IssueKey
+
+	bodyJson, _ := json.Marshal(SOPSendMessageToUser{
+		EmployeeCode: employeeCode,
+		Message: SOPMessage{
+			Tag: "interactive_message",
+			InteractiveMessage: &SOPInteractiveMessage{
+				Elements: []SOPInteractiveElement{
+					{
+						ElementType: "title",
+						Title: &SOPInteractiveTitle{
+							Text: title,
+						},
+					},
+					{
+						ElementType: "description",
+						Description: &SOPInteractiveDescription{
+							Format: 1,
+							Text:   description,
+						},
+					},
+					{
+						ElementType: "button",
+						Button: &SOPInteractiveButton{
+							ButtonType:   "callback",
+							Text:         "Complete ✅",
+							Value:        "kb_complete_" + buttonID,
+							CallbackData: "kb_complete_" + buttonID,
+							ActionID:     "kb_complete_" + buttonID,
+						},
+					},
+					{
+						ElementType: "button",
+						Button: &SOPInteractiveButton{
+							ButtonType:   "callback",
+							Text:         "Nothing to update 🚫",
+							Value:        "kb_cancel_" + buttonID,
+							CallbackData: "kb_cancel_" + buttonID,
+							ActionID:     "kb_cancel_" + buttonID,
+						},
+					},
+				},
+			},
+		},
+	})
+
+	req, err := http.NewRequest("POST", "https://openapi.seatalk.io/messaging/v2/single_chat", bytes.NewBuffer(bodyJson))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Add("Content-Type", "application/json")
+	req.Header.Add("Authorization", "Bearer "+GetAppAccessToken().AccessToken)
+
+	client := &http.Client{}
+	res, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+
+	resp := &SendMessageToUserResp{}
+	if err := json.NewDecoder(res.Body).Decode(resp); err != nil {
+		return err
+	}
+
+	if resp.Code != 0 {
+		return fmt.Errorf("failed to send status reminder to user | Code: %d, Message: %s", resp.Code, resp.Message)
 	}
 
 	return nil
@@ -1712,117 +1815,14 @@ Click the appropriate button below:`,
 	return nil
 }
 
-// Send a status reminder with interactive buttons to a user privately
-func sendStatusReminderToUser(reminder *QAReminder, employeeCode string) error {
-	// Create a temporary JiraIssue to reuse formatJiraTicketWithTitle
-	tempJiraIssue := JiraIssue{
-		Key: reminder.IssueKey,
-		Fields: JiraFields{
-			Summary: reminder.Summary,
-		},
-	}
-	jiraTicketWithTitle := formatJiraTicketWithTitle(&tempJiraIssue)
-
-	// Use stored Jira update time
-	recentlyCompletedTestingDate := reminder.UpdatedTime.Format("02 Jan 2006")
-
-	// Calculate how long ago the reminder was sent (use LastSentTime for follow-ups)
-	timeSinceSent := time.Since(reminder.LastSentTime)
-	sentAgo := formatDuration(timeSinceSent)
-
-	ticketType := reminder.IssueType
-	description := fmt.Sprintf(`**Jira (%s):** %s
-📅 **Completed Testing recently:** %s
-⏰ **Latest reminder Sent:** %s ago
-
-Click the appropriate button below:`,
-		ticketType, jiraTicketWithTitle, recentlyCompletedTestingDate, sentAgo)
-
-	// Create interactive message with buttons (include reminder number to match thread format)
-	title := fmt.Sprintf("📚 Knowledge Base Reminder %d", reminder.ReminderNumber)
-	// Use ticket key only as button ID (consistent with group reminders)
-	buttonID := reminder.IssueKey
-
-	bodyJson, _ := json.Marshal(SOPSendMessageToUser{
-		EmployeeCode: employeeCode,
-		Message: SOPMessage{
-			Tag: "interactive_message",
-			InteractiveMessage: &SOPInteractiveMessage{
-				Elements: []SOPInteractiveElement{
-					{
-						ElementType: "title",
-						Title: &SOPInteractiveTitle{
-							Text: title,
-						},
-					},
-					{
-						ElementType: "description",
-						Description: &SOPInteractiveDescription{
-							Format: 1,
-							Text:   description,
-						},
-					},
-					{
-						ElementType: "button",
-						Button: &SOPInteractiveButton{
-							ButtonType:   "callback",
-							Text:         "Complete ✅",
-							Value:        "kb_complete_" + buttonID,
-							CallbackData: "kb_complete_" + buttonID,
-							ActionID:     "kb_complete_" + buttonID,
-						},
-					},
-					{
-						ElementType: "button",
-						Button: &SOPInteractiveButton{
-							ButtonType:   "callback",
-							Text:         "Nothing to update 🚫",
-							Value:        "kb_cancel_" + buttonID,
-							CallbackData: "kb_cancel_" + buttonID,
-							ActionID:     "kb_cancel_" + buttonID,
-						},
-					},
-				},
-			},
-		},
-	})
-
-	req, err := http.NewRequest("POST", "https://openapi.seatalk.io/messaging/v2/single_chat", bytes.NewBuffer(bodyJson))
-	if err != nil {
-		return err
-	}
-
-	req.Header.Add("Content-Type", "application/json")
-	req.Header.Add("Authorization", "Bearer "+GetAppAccessToken().AccessToken)
-
-	client := &http.Client{}
-	res, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-
-	resp := &SendMessageToUserResp{}
-	if err := json.NewDecoder(res.Body).Decode(resp); err != nil {
-		return err
-	}
-
-	if resp.Code != 0 {
-		return fmt.Errorf("failed to send interactive message to user, response code: %v", resp.Code)
-	}
-
-	log.Printf("INFO: Status reminder sent to user for ticket %s", reminder.IssueKey)
-	return nil
-}
-
 func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 	message := reqSOP.Event.Message.Text.Content
 	if message == "" {
 		message = reqSOP.Event.Message.Text.PlainText
 	}
 
-	displayName := getEmployeeDisplayNameWithCode(reqSOP.Event)
-	log.Printf("INFO: private message received: %s, from: %s", message, displayName)
+	displayName := getEmployeeDisplayName(reqSOP.Event)
+	log.Printf("INFO: private message received: %s, from: %s (%s)", message, displayName, reqSOP.Event.EmployeeCode)
 
 	messageLower := strings.ToLower(message)
 
@@ -1857,7 +1857,7 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 		}
 
 	case strings.Contains(messageLower, "status"):
-		log.Printf("INFO: Status command received from: %s", getEmployeeDisplayNameWithCode(reqSOP.Event))
+		log.Printf("INFO: Status command received from: %s (%s)", displayName, reqSOP.Event.EmployeeCode)
 
 		// Get all incomplete reminders for this user
 		reminderMutex.RLock()
@@ -1899,7 +1899,7 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 		}
 
 	case strings.Contains(messageLower, "sjira"):
-		log.Printf("INFO: Silent Jira testing mode triggered by: %s", getEmployeeDisplayNameWithCode(reqSOP.Event))
+		log.Printf("INFO: Silent Jira testing mode triggered by: %s (%s)", displayName, reqSOP.Event.EmployeeCode)
 
 		sentCount, err := processQAReminders(true)
 		if err != nil {
@@ -1936,7 +1936,7 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 		}
 
 	case strings.Contains(messageLower, "jira"):
-		log.Printf("INFO: Manual QA reminder trigger detected from: %s", getEmployeeDisplayNameWithCode(reqSOP.Event))
+		log.Printf("INFO: Manual QA reminder trigger detected from: %s (%s)", displayName, reqSOP.Event.EmployeeCode)
 
 		sentCount, err := processQAReminders(false)
 		if err != nil {
@@ -2003,7 +2003,8 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 
 **For Manager:**
 - Can manually trigger Jira ticket queries via bot with "jira"
-- Can check all pending QA reminders via bot with "list" to see all pending and completed reminders
+- Can check all pending and completed QA reminders via bot with "list"
+- Can check all reminder counts by each QA via bot with "count"
 
 **For Members:**
 - Members can see their pending reminders via bot with "status" and can complete actions from there
@@ -2035,7 +2036,8 @@ func handleGroupMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 	switch {
 	case strings.Contains(messageLower, "debug") || strings.Contains(messageLower, "groupid"):
 		debugMsg := `🔧 **Debug Info:**
-🏢 **This Group ID:** ` + reqSOP.Event.GroupID
+🏢 **This Group ID:** ` + reqSOP.Event.GroupID + `
+🆔 **Your Employee Code:** ` + reqSOP.Event.EmployeeCode
 
 		if _, err := SendMessageToGroup(ctx, debugMsg, reqSOP.Event.GroupID); err != nil {
 			log.Printf("ERROR: Failed to send debug message to group: %v", err)
@@ -2131,7 +2133,7 @@ func handleButtonClick(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 	// Check if user is clicking the same button again
 	if slices.Contains(userResponses, buttonType) {
 		responseMutex.Unlock()
-		displayName := getEmployeeDisplayNameWithCode(reqSOP.Event)
+		displayName := getEmployeeDisplayName(reqSOP.Event)
 		log.Printf("INFO: User %s (%s) already clicked %s button for alert %s, ignoring duplicate", displayName, reqSOP.Event.EmployeeCode, buttonType, ticketKey)
 
 		// Send private message to inform the user
@@ -2380,11 +2382,11 @@ func markQAReminderCompleted(ticketKey, buttonStatus string, event Event) {
 		reminder.CompletedTime = getSingaporeTime() // Set the actual completion time
 
 		// Log who completed it with employee code
-		displayName := getEmployeeDisplayNameWithCode(event)
+		displayName := getEmployeeDisplayName(event)
 		if wasAlreadyCompleted {
-			log.Printf("INFO: QA reminder for %s was already completed, updating status to %s by %s", ticketKey, buttonStatus, displayName)
+			log.Printf("INFO: QA reminder for %s was already completed, updating status to %s by %s (%s)", ticketKey, buttonStatus, displayName, event.EmployeeCode)
 		} else {
-			log.Printf("INFO: QA reminder for %s marked as completed by %s with status: %s", ticketKey, displayName, buttonStatus)
+			log.Printf("INFO: QA reminder for %s marked as completed by %s (%s) with status: %s", ticketKey, displayName, event.EmployeeCode, buttonStatus)
 		}
 
 		// Save to database
@@ -2504,15 +2506,6 @@ func getEmployeeDisplayName(event Event) string {
 
 	// Fallback to employee code
 	return event.EmployeeCode
-}
-
-// getEmployeeDisplayNameWithCode returns display name with employee code in format "DisplayName (EmployeeCode)"
-func getEmployeeDisplayNameWithCode(event Event) string {
-	displayName := getEmployeeDisplayName(event)
-	if event.EmployeeCode != "" {
-		return fmt.Sprintf("%s (%s)", displayName, event.EmployeeCode)
-	}
-	return displayName
 }
 
 func formatEmailAsName(email string) string {
