@@ -104,23 +104,37 @@ type SOPEventVerificationResp struct {
 
 type Event struct {
 	SeatalkChallenge string  `json:"seatalk_challenge"`
-	EmployeeCode     string  `json:"employee_code"`
-	DisplayName      string  `json:"display_name"`
-	Email            string  `json:"email"`
+	EmployeeCode     string  `json:"employee_code"` // For private messages and backward compatibility
+	DisplayName      string  `json:"display_name"`  // For private messages and backward compatibility
+	Email            string  `json:"email"`         // For private messages and backward compatibility
 	GroupID          string  `json:"group_id"`
 	Message          Message `json:"message"`
 	MessageID        string  `json:"message_id"`
 	Value            string  `json:"value"`
 }
 
+type Sender struct {
+	SeatalkID    string `json:"seatalk_id"`
+	EmployeeCode string `json:"employee_code"`
+}
+
 type Message struct {
-	Tag  string      `json:"tag"`
-	Text TextMessage `json:"text"`
+	Tag       string      `json:"tag"`
+	Text      TextMessage `json:"text"`
+	MessageID string      `json:"message_id,omitempty"` // For group chat messages
+	Sender    *Sender     `json:"sender,omitempty"`     // For group chat messages: event.message.sender.employee_code
 }
 
 type TextMessage struct {
-	Content   string `json:"content"`
-	PlainText string `json:"plain_text"`
+	Content       string          `json:"content"`
+	PlainText     string          `json:"plain_text"`
+	MentionedList []MentionedUser `json:"mentioned_list,omitempty"`
+}
+
+type MentionedUser struct {
+	Username     string `json:"username"`
+	SeatalkID    string `json:"seatalk_id"`
+	EmployeeCode string `json:"employee_code,omitempty"` // Present if mentioned user is a person
 }
 
 type AppAccessToken struct {
@@ -507,7 +521,7 @@ func main() {
 			handleGroupMessage(ctx, reqSOP)
 			ctx.JSON(http.StatusOK, "Success")
 		case "user_enter_chatroom_with_bot":
-			log.Printf("DEBUG: User entered chatroom - %s (%s)", getEmployeeDisplayName(reqSOP.Event), reqSOP.Event.EmployeeCode)
+			log.Printf("DEBUG: User entered chatroom - %s (%s)", getEmployeeDisplayName(reqSOP.Event), getEmployeeCode(reqSOP.Event))
 		case "new_message_received_from_thread":
 			ctx.JSON(http.StatusOK, "Success")
 		default:
@@ -1822,7 +1836,7 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 	}
 
 	displayName := getEmployeeDisplayName(reqSOP.Event)
-	log.Printf("INFO: private message received: %s, from: %s (%s)", message, displayName, reqSOP.Event.EmployeeCode)
+	log.Printf("INFO: private message received: %s, from: %s (%s)", message, displayName, getEmployeeCode(reqSOP.Event))
 
 	messageLower := strings.ToLower(message)
 
@@ -1832,11 +1846,11 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 		debugMsg := `🔧 **Debug Info:**
 
 📍 **Current Context:** Private Message
-👤 **Your Employee Code:** ` + reqSOP.Event.EmployeeCode + `
+👤 **Your Employee Code:** ` + getEmployeeCode(reqSOP.Event) + `
 
 💡 **To get group ID, mention me in the group with "debug"`
 
-		if err := SendMessageToUser(ctx, debugMsg, reqSOP.Event.EmployeeCode); err != nil {
+		if err := SendMessageToUser(ctx, debugMsg, getEmployeeCode(reqSOP.Event)); err != nil {
 			log.Printf("ERROR: Failed to send debug message: %v", err)
 		}
 
@@ -1844,7 +1858,7 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 		// Generate the knowledge base list
 		listMsg := generateKnowledgeBaseList()
 
-		if err := SendMessageToUser(ctx, listMsg, reqSOP.Event.EmployeeCode); err != nil {
+		if err := SendMessageToUser(ctx, listMsg, getEmployeeCode(reqSOP.Event)); err != nil {
 			log.Printf("ERROR: Failed to send list message: %v", err)
 		}
 
@@ -1852,12 +1866,12 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 		// Generate the reminder counts
 		countMsg := generateReminderCounts()
 
-		if err := SendMessageToUser(ctx, countMsg, reqSOP.Event.EmployeeCode); err != nil {
+		if err := SendMessageToUser(ctx, countMsg, getEmployeeCode(reqSOP.Event)); err != nil {
 			log.Printf("ERROR: Failed to send count message: %v", err)
 		}
 
 	case strings.Contains(messageLower, "status"):
-		log.Printf("INFO: Status command received from: %s (%s)", displayName, reqSOP.Event.EmployeeCode)
+		log.Printf("INFO: Status command received from: %s (%s)", displayName, getEmployeeCode(reqSOP.Event))
 
 		// Get all incomplete reminders for this user
 		reminderMutex.RLock()
@@ -1876,7 +1890,7 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 
 		if len(userReminders) == 0 {
 			noRemindersMsg := "✅ You have no pending QA reminders. Great job! 🎉"
-			if err := SendMessageToUser(ctx, noRemindersMsg, reqSOP.Event.EmployeeCode); err != nil {
+			if err := SendMessageToUser(ctx, noRemindersMsg, getEmployeeCode(reqSOP.Event)); err != nil {
 				log.Printf("ERROR: Failed to send no reminders message: %v", err)
 			}
 		} else {
@@ -1887,25 +1901,25 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 
 			// Send interactive message for each reminder
 			for _, reminder := range userReminders {
-				if err := sendStatusReminderToUser(reminder, reqSOP.Event.EmployeeCode); err != nil {
+				if err := sendStatusReminderToUser(reminder, getEmployeeCode(reqSOP.Event)); err != nil {
 					log.Printf("ERROR: Failed to send status reminder for %s: %v", reminder.IssueKey, err)
 				}
 			}
 
 			summaryMsg := fmt.Sprintf("📋 You have **%d** pending QA reminder(s). Please review and update accordingly.", len(userReminders))
-			if err := SendMessageToUser(ctx, summaryMsg, reqSOP.Event.EmployeeCode); err != nil {
+			if err := SendMessageToUser(ctx, summaryMsg, getEmployeeCode(reqSOP.Event)); err != nil {
 				log.Printf("ERROR: Failed to send summary message: %v", err)
 			}
 		}
 
 	case strings.Contains(messageLower, "sjira"):
-		log.Printf("INFO: Silent Jira testing mode triggered by: %s (%s)", displayName, reqSOP.Event.EmployeeCode)
+		log.Printf("INFO: Silent Jira testing mode triggered by: %s (%s)", displayName, getEmployeeCode(reqSOP.Event))
 
 		sentCount, err := processQAReminders(true)
 		if err != nil {
 			log.Printf("ERROR: Silent Jira testing failed: %v", err)
 			errorMsg := "❌ Silent testing failed. Please check:\n• Jira service is accessible\n• Jira API credentials are set correctly\n📖 Please refer to the ENV_SETUP file for configuration instructions"
-			if err := SendMessageToUser(ctx, errorMsg, reqSOP.Event.EmployeeCode); err != nil {
+			if err := SendMessageToUser(ctx, errorMsg, getEmployeeCode(reqSOP.Event)); err != nil {
 				log.Printf("ERROR: Failed to send error message: %v", err)
 			}
 		} else {
@@ -1930,19 +1944,19 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 				log.Printf("INFO: Silent Jira testing completed - %d eligible tickets found, %d follow-up reminders sent", sentCount, followUpCount)
 			}
 
-			if err := SendMessageToUser(ctx, confirmMsg, reqSOP.Event.EmployeeCode); err != nil {
+			if err := SendMessageToUser(ctx, confirmMsg, getEmployeeCode(reqSOP.Event)); err != nil {
 				log.Printf("ERROR: Failed to send confirmation: %v", err)
 			}
 		}
 
 	case strings.Contains(messageLower, "jira"):
-		log.Printf("INFO: Manual QA reminder trigger detected from: %s (%s)", displayName, reqSOP.Event.EmployeeCode)
+		log.Printf("INFO: Manual QA reminder trigger detected from: %s (%s)", displayName, getEmployeeCode(reqSOP.Event))
 
 		sentCount, err := processQAReminders(false)
 		if err != nil {
 			log.Printf("ERROR: Manual QA reminder processing failed: %v", err)
 			errorMsg := "❌ Failed to query Jira. Please check:\n• Jira service is accessible\n• Jira API credentials are set correctly\n📖 Please refer to the ENV_SETUP file for configuration instructions"
-			if err := SendMessageToUser(ctx, errorMsg, reqSOP.Event.EmployeeCode); err != nil {
+			if err := SendMessageToUser(ctx, errorMsg, getEmployeeCode(reqSOP.Event)); err != nil {
 				log.Printf("ERROR: Failed to send error message: %v", err)
 			}
 		} else {
@@ -1967,7 +1981,7 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 				log.Printf("INFO: Manual QA reminder processing completed - %d reminders sent, %d follow-up reminders sent", sentCount, followUpCount)
 			}
 
-			if err := SendMessageToUser(ctx, confirmMsg, reqSOP.Event.EmployeeCode); err != nil {
+			if err := SendMessageToUser(ctx, confirmMsg, getEmployeeCode(reqSOP.Event)); err != nil {
 				log.Printf("ERROR: Failed to send confirmation: %v", err)
 			}
 		}
@@ -2011,12 +2025,12 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 - Members can only click on their own pending actions
 - Members can switch buttons but can only click once`
 
-		if err := SendMessageToUser(ctx, helpMsg, reqSOP.Event.EmployeeCode); err != nil {
+		if err := SendMessageToUser(ctx, helpMsg, getEmployeeCode(reqSOP.Event)); err != nil {
 			log.Printf("ERROR: Failed to send help message: %v", err)
 		}
 	default:
 		// Default response for other messages
-		if err := SendMessageToUser(ctx, "Hello! Send 'help' to see available commands, 'alert' to trigger a knowledge base reminder, or 'qa' to manually check for QA reminders.", reqSOP.Event.EmployeeCode); err != nil {
+		if err := SendMessageToUser(ctx, "Hello! Send 'help' to see available commands, 'alert' to trigger a knowledge base reminder, or 'qa' to manually check for QA reminders.", getEmployeeCode(reqSOP.Event)); err != nil {
 			log.Printf("ERROR: something wrong when send message to user, error: %v", err)
 		}
 	}
@@ -2037,7 +2051,7 @@ func handleGroupMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 	case strings.Contains(messageLower, "debug") || strings.Contains(messageLower, "groupid"):
 		debugMsg := `🔧 **Debug Info:**
 🏢 **This Group ID:** ` + reqSOP.Event.GroupID + `
-🆔 **Your Employee Code:** ` + reqSOP.Event.EmployeeCode
+🆔 **Your Employee Code:** ` + getEmployeeCode(reqSOP.Event)
 
 		if _, err := SendMessageToGroup(ctx, debugMsg, reqSOP.Event.GroupID); err != nil {
 			log.Printf("ERROR: Failed to send debug message to group: %v", err)
@@ -2111,7 +2125,7 @@ func handleButtonClick(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 		alertResponses[messageID] = make(map[string][]string)
 	}
 
-	userResponses := alertResponses[messageID][reqSOP.Event.EmployeeCode]
+	userResponses := alertResponses[messageID][getEmployeeCode(reqSOP.Event)]
 
 	// Check if user has already pressed both buttons
 	hasComplete := slices.Contains(userResponses, "complete")
@@ -2120,12 +2134,12 @@ func handleButtonClick(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 	if hasComplete && hasCancel {
 		responseMutex.Unlock()
 		displayName := getEmployeeDisplayName(reqSOP.Event)
-		log.Printf("INFO: User %s (%s) has already used both buttons for alert %s, blocking further clicks", displayName, reqSOP.Event.EmployeeCode, ticketKey)
+		log.Printf("INFO: User %s (%s) has already used both buttons for alert %s, blocking further clicks", displayName, getEmployeeCode(reqSOP.Event), ticketKey)
 
 		// Send private message to inform the user
 		msg := fmt.Sprintf("⚠️ You have already responded to this reminder for ticket %s with both actions (Complete and Nothing to update). No further actions are possible.", ticketKey)
-		if err := SendMessageToUser(ctx, msg, reqSOP.Event.EmployeeCode); err != nil {
-			log.Printf("ERROR: Failed to send blocked button click message to user %s (%s): %v", displayName, reqSOP.Event.EmployeeCode, err)
+		if err := SendMessageToUser(ctx, msg, getEmployeeCode(reqSOP.Event)); err != nil {
+			log.Printf("ERROR: Failed to send blocked button click message to user %s (%s): %v", displayName, getEmployeeCode(reqSOP.Event), err)
 		}
 		return
 	}
@@ -2134,7 +2148,7 @@ func handleButtonClick(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 	if slices.Contains(userResponses, buttonType) {
 		responseMutex.Unlock()
 		displayName := getEmployeeDisplayName(reqSOP.Event)
-		log.Printf("INFO: User %s (%s) already clicked %s button for alert %s, ignoring duplicate", displayName, reqSOP.Event.EmployeeCode, buttonType, ticketKey)
+		log.Printf("INFO: User %s (%s) already clicked %s button for alert %s, ignoring duplicate", displayName, getEmployeeCode(reqSOP.Event), buttonType, ticketKey)
 
 		// Send private message to inform the user
 		var actionText string
@@ -2144,8 +2158,8 @@ func handleButtonClick(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 			actionText = "Nothing to update"
 		}
 		msg := fmt.Sprintf("ℹ️ You have already clicked the \"%s\" button for ticket %s. No further action is needed.", actionText, ticketKey)
-		if err := SendMessageToUser(ctx, msg, reqSOP.Event.EmployeeCode); err != nil {
-			log.Printf("ERROR: Failed to send duplicate button click message to user %s (%s): %v", displayName, reqSOP.Event.EmployeeCode, err)
+		if err := SendMessageToUser(ctx, msg, getEmployeeCode(reqSOP.Event)); err != nil {
+			log.Printf("ERROR: Failed to send duplicate button click message to user %s (%s): %v", displayName, getEmployeeCode(reqSOP.Event), err)
 		}
 		return
 	}
@@ -2170,7 +2184,7 @@ func handleButtonClick(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 	if authorizedReminder == nil {
 		// Send a private message to inform them
 		unauthorizedMsg := fmt.Sprintf("⚠️ The reminder for %s is assigned to a specific QA team member. Only the assigned QA can respond to that reminder.", ticketKey)
-		if err := SendMessageToUser(ctx, unauthorizedMsg, reqSOP.Event.EmployeeCode); err != nil {
+		if err := SendMessageToUser(ctx, unauthorizedMsg, getEmployeeCode(reqSOP.Event)); err != nil {
 			log.Printf("ERROR: Failed to send unauthorized message: %v", err)
 		}
 		return
@@ -2178,7 +2192,7 @@ func handleButtonClick(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 
 	// Add this button type to user's response history
 	responseMutex.Lock()
-	alertResponses[messageID][reqSOP.Event.EmployeeCode] = append(userResponses, buttonType)
+	alertResponses[messageID][getEmployeeCode(reqSOP.Event)] = append(userResponses, buttonType)
 	isSecondButton := len(userResponses) > 0 // This will be the second button press
 	responseMutex.Unlock()
 
@@ -2498,6 +2512,19 @@ func cleanupOldReminders() error {
 	return nil
 }
 
+// getEmployeeCode extracts employee_code from event, checking both old and new structures
+// For group chats: event.message.sender.employee_code
+// For private messages: event.employee_code (backward compatibility)
+func getEmployeeCode(event Event) string {
+	// For group chats: check event.message.sender.employee_code
+	if event.Message.Sender != nil && event.Message.Sender.EmployeeCode != "" {
+		return event.Message.Sender.EmployeeCode
+	}
+
+	// Fallback to old structure: event.employee_code (for private messages and backward compatibility)
+	return event.EmployeeCode
+}
+
 func getEmployeeDisplayName(event Event) string {
 	// Try to create a nice name from email
 	if event.Email != "" {
@@ -2505,7 +2532,7 @@ func getEmployeeDisplayName(event Event) string {
 	}
 
 	// Fallback to employee code
-	return event.EmployeeCode
+	return getEmployeeCode(event)
 }
 
 func formatEmailAsName(email string) string {
