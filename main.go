@@ -490,7 +490,8 @@ func main() {
 		// Event deduplication - check if event already processed
 		eventMutex.Lock()
 		if processedEvents[reqSOP.EventID] {
-			log.Printf("INFO: Event %s already processed, skipping", reqSOP.EventID)
+			eventJSON, _ := json.MarshalIndent(reqSOP, "", "  ")
+			log.Printf("INFO: Event already processed, skipping, event:%s", string(eventJSON))
 			eventMutex.Unlock()
 			ctx.JSON(http.StatusOK, "Event already processed")
 			return
@@ -510,6 +511,8 @@ func main() {
 		// 	return
 		// }
 
+		employeeName := getEmployeeDisplayName(reqSOP.Event)
+		employeeCode := getEmployeeCode(reqSOP.Event)
 		switch reqSOP.EventType {
 		case "interactive_message_click":
 			handleButtonClick(ctx, reqSOP)
@@ -521,8 +524,13 @@ func main() {
 			handleGroupMessage(ctx, reqSOP)
 			ctx.JSON(http.StatusOK, "Success")
 		case "user_enter_chatroom_with_bot":
-			log.Printf("DEBUG: User entered chatroom - %s (%s)", getEmployeeDisplayName(reqSOP.Event), getEmployeeCode(reqSOP.Event))
+			log.Printf("DEBUG: User entered chatroom - %s (%s)", employeeName, employeeCode)
 		case "new_message_received_from_thread":
+			messageContent := reqSOP.Event.Message.Text.PlainText
+			if messageContent == "" {
+				messageContent = reqSOP.Event.Message.Text.Content
+			}
+			log.Printf("INFO: Thread message - From: %s (%s), Content: %s", employeeName, employeeCode, messageContent)
 			ctx.JSON(http.StatusOK, "Success")
 		default:
 			log.Printf("event %s not handled yet!", reqSOP.EventType)
