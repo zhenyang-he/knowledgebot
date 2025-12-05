@@ -96,6 +96,7 @@ type QAReminder struct {
 type GroupMember struct {
 	DisplayName string `json:"display_name"`
 	Email       string `json:"email"`
+	Code        string `json:"code"`
 }
 
 type SOPEventVerificationResp struct {
@@ -116,6 +117,7 @@ type Event struct {
 type Sender struct {
 	SeatalkID    string `json:"seatalk_id"`
 	EmployeeCode string `json:"employee_code"`
+	Email        string `json:"email"`
 }
 
 type Message struct {
@@ -2534,13 +2536,24 @@ func getEmployeeCode(event Event) string {
 }
 
 func getEmployeeDisplayName(event Event) string {
-	// Try to create a nice name from email
-	if event.Email != "" {
-		return formatEmailAsName(event.Email)
+	// Try to get email from event directly
+	email := event.Email
+	if email == "" && event.Message.Sender != nil {
+		email = event.Message.Sender.Email
 	}
 
-	// Fallback to employee code
-	return getEmployeeCode(event)
+	// If no email, try to get it from employee code
+	if email == "" {
+		employeeCode := getEmployeeCode(event)
+		if employeeCode != "" {
+			email = getEmailByEmployeeCode(employeeCode)
+		}
+	}
+
+	if email != "" {
+		return formatEmailAsName(email)
+	}
+	return ""
 }
 
 func formatEmailAsName(email string) string {
@@ -2663,38 +2676,60 @@ func getGroupMembers() []GroupMember {
 		{
 			Email:       "zhenyang.he@shopee.com",
 			DisplayName: formatEmailAsName("zhenyang.he@shopee.com"),
+			Code:        "27268",
 		},
 		{
 			Email:       "vijay.krishnamraju@shopee.com",
 			DisplayName: formatEmailAsName("vijay.krishnamraju@shopee.com"),
+			Code:        "5973",
 		},
 		{
 			Email:       "allyson.turiano@shopee.com",
 			DisplayName: formatEmailAsName("allyson.turiano@shopee.com"),
+			Code:        "43828",
 		},
 		{
 			Email:       "ayush.bansal@shopee.com",
 			DisplayName: formatEmailAsName("ayush.bansal@shopee.com"),
+			Code:        "13333",
 		},
 		{
 			Email:       "jingrui.hu@shopee.com",
 			DisplayName: formatEmailAsName("jingrui.hu@shopee.com"),
+			Code:        "78253",
 		},
 		{
 			Email:       "joey.chengxy@shopee.com",
 			DisplayName: formatEmailAsName("joey.chengxy@shopee.com"),
+			Code:        "161475",
 		},
 		{
 			Email:       "kangloon.ng@shopee.com",
 			DisplayName: formatEmailAsName("kangloon.ng@shopee.com"),
+			Code:        "44430",
 		},
 		{
 			Email:       "shaoyun.tan@shopee.com",
 			DisplayName: formatEmailAsName("shaoyun.tan@shopee.com"),
+			Code:        "161489",
 		},
 	}
 
 	return members
+}
+
+// getEmailByEmployeeCode fetches the email by employee code from group members
+func getEmailByEmployeeCode(employeeCode string) string {
+	if employeeCode == "" {
+		return ""
+	}
+	members := getGroupMembers()
+	for _, member := range members {
+		if member.Code == employeeCode {
+			return member.Email
+		}
+	}
+	return ""
 }
 
 // Helper function to get environment variable with default value
