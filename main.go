@@ -1747,8 +1747,6 @@ func processFollowUpReminders(isSilent bool) (int, error) {
 
 		// Build summary message with member breakdown
 		summaryMsg := fmt.Sprintf("**%s**\n", today)
-		summaryMsg += "🌅 Good morning! "
-		summaryMsg += `<mention-tag target="seatalk://user?email=shuang.xiao@shopee.com"/>` + "\n"
 		summaryMsg += fmt.Sprintf("**%d** number of follow up reminders have been sent today.", totalSent)
 
 		// Add per-member breakdown
