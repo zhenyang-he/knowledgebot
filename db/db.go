@@ -26,6 +26,11 @@ func GetDB() *DB {
 	return instance
 }
 
+type ReminderCounts struct {
+	PendingCount int
+	TotalCount   int
+}
+
 // Init initializes the database connection and creates tables if needed
 func Init() error {
 	dbURL := os.Getenv("DATABASE_URL")
@@ -64,7 +69,8 @@ func Init() error {
 
 	CREATE TABLE IF NOT EXISTS reminder_counts (
 		qa_email TEXT PRIMARY KEY,
-		count INTEGER NOT NULL DEFAULT 0
+		pending_count INTEGER NOT NULL DEFAULT 0,
+		total_count INTEGER NOT NULL DEFAULT 0
 	);
 
 	CREATE TABLE IF NOT EXISTS daily_messages (
@@ -88,6 +94,20 @@ func Init() error {
 
 	if _, err := conn.Exec(createTablesSQL); err != nil {
 		return fmt.Errorf("failed to create tables: %w", err)
+	}
+
+	// Lightweight migrations for older deployments (keep reminder_counts as the single source for both counters).
+	// 0) Ensure pending_count exists.
+	if _, err := conn.Exec(`ALTER TABLE reminder_counts ADD COLUMN IF NOT EXISTS pending_count INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return fmt.Errorf("failed to migrate reminder_counts.pending_count: %w", err)
+	}
+	// 1) Ensure total_count exists.
+	if _, err := conn.Exec(`ALTER TABLE reminder_counts ADD COLUMN IF NOT EXISTS total_count INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return fmt.Errorf("failed to migrate reminder_counts.total_count: %w", err)
+	}
+	// 2) Remove legacy column name (renamed to pending_count).
+	if _, err := conn.Exec(`ALTER TABLE reminder_counts DROP COLUMN IF EXISTS count`); err != nil {
+		return fmt.Errorf("failed to drop reminder_counts.count: %w", err)
 	}
 
 	once.Do(func() {
@@ -164,16 +184,20 @@ func (db *DB) SaveReminder(reminder *QAReminder) error {
 	return err
 }
 
-// SaveReminderCount saves reminder count for a QA
-func (db *DB) SaveReminderCount(qaEmail string, count int) error {
+// SaveReminderCounts saves pending reminder count and total reminders sent for a QA.
+// - pendingCount: can increment/decrement (tracks current outstanding reminders)
+// - totalCount: monotonic (tracks total reminders successfully sent)
+func (db *DB) SaveReminderCounts(qaEmail string, pendingCount int, totalCount int) error {
 	if !db.IsAvailable() {
 		return nil
 	}
 
 	_, err := db.conn.Exec(`
-		INSERT INTO reminder_counts (qa_email, count) VALUES ($1, $2)
-		ON CONFLICT (qa_email) DO UPDATE SET count = EXCLUDED.count
-	`, qaEmail, count)
+		INSERT INTO reminder_counts (qa_email, pending_count, total_count) VALUES ($1, $2, $3)
+		ON CONFLICT (qa_email) DO UPDATE SET
+			pending_count = EXCLUDED.pending_count,
+			total_count = EXCLUDED.total_count
+	`, qaEmail, pendingCount, totalCount)
 
 	return err
 }
@@ -260,26 +284,30 @@ func (db *DB) LoadAllReminders() ([]*QAReminder, error) {
 }
 
 // LoadAllReminderCounts loads all reminder counts from database
-func (db *DB) LoadAllReminderCounts() (map[string]int, error) {
+func (db *DB) LoadAllReminderCounts() (map[string]ReminderCounts, error) {
 	if !db.IsAvailable() {
 		return nil, fmt.Errorf("database not initialized")
 	}
 
-	rows, err := db.conn.Query("SELECT qa_email, count FROM reminder_counts")
+	rows, err := db.conn.Query("SELECT qa_email, pending_count, total_count FROM reminder_counts")
 	if err != nil {
 		return nil, fmt.Errorf("failed to query reminder counts: %w", err)
 	}
 	defer rows.Close()
 
-	counts := make(map[string]int)
+	counts := make(map[string]ReminderCounts)
 	for rows.Next() {
 		var email string
-		var count int
-		if err := rows.Scan(&email, &count); err != nil {
+		var pending int
+		var totalCount int
+		if err := rows.Scan(&email, &pending, &totalCount); err != nil {
 			log.Printf("WARN: Failed to scan reminder count: %v", err)
 			continue
 		}
-		counts[email] = count
+		counts[email] = ReminderCounts{
+			PendingCount: pending,
+			TotalCount:   totalCount,
+		}
 	}
 
 	return counts, nil

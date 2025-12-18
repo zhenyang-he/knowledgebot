@@ -70,11 +70,14 @@ With database persistence, all this data is saved and automatically restored whe
 
 ### Database Schema
 
-The bot creates 3 tables automatically:
+The bot creates tables automatically:
 
 1. **`reminders`** - Stores all QA reminders
-2. **`reminder_counts`** - Stores reminder counts per QA
+2. **`reminder_counts`** - Stores per-QA counters:
+   - `pending_count`: pending reminders (can increase/decrease)
+   - `total_count`: total reminders successfully sent (monotonic, never decreases)
 3. **`daily_messages`** - Stores daily message deduplication
+4. **`main_reminders`** - Stores main reminder message IDs for threading (recent only)
 
 ## Testing
 
