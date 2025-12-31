@@ -234,8 +234,11 @@ var (
 	reminderMutex sync.RWMutex
 
 	// Track reminder count for each QA member
-	qaReminderCounts = make(map[string]int) // qaEmail -> current reminder count
-	qaCountMutex     sync.RWMutex
+	// - pending: current outstanding reminders (can go up/down)
+	// - totalCount: total reminders successfully sent (monotonic, never decreases)
+	qaPendingCounts = make(map[string]int) // qaEmail -> pending reminder count
+	qaTotalCount    = make(map[string]int) // qaEmail -> total reminders sent
+	qaCountMutex    sync.RWMutex
 )
 
 // Generate the knowledge base status list message
@@ -360,7 +363,7 @@ func generateReminderCounts() string {
 
 	// Build the count message
 	var countMsg strings.Builder
-	countMsg.WriteString("📊 **Current Reminder Counts**\n\n")
+	countMsg.WriteString("📊 **Pending Ticket Counts**\n\n")
 
 	// Sort members by display name for consistent output
 	type qaCount struct {
@@ -371,7 +374,7 @@ func generateReminderCounts() string {
 	var counts []qaCount
 
 	for _, member := range members {
-		count := qaReminderCounts[member.Email]
+		count := qaPendingCounts[member.Email]
 		counts = append(counts, qaCount{
 			name:  member.DisplayName,
 			email: member.Email,
@@ -1028,48 +1031,15 @@ func sendMainQAReminder(qa GroupMember, ticketCount int) (string, error) {
 	return messageID, nil
 }
 
-// Get next reminder number for a QA member
-func getNextReminderNumber(qaEmail string) int {
-	qaCountMutex.Lock()
-	defer qaCountMutex.Unlock()
-
-	qaReminderCounts[qaEmail]++
-	count := qaReminderCounts[qaEmail]
-
-	// Save to database
-	if dbInstance := db.GetDB(); dbInstance != nil {
-		if err := dbInstance.SaveReminderCount(qaEmail, count); err != nil {
-			log.Printf("WARN: Failed to save reminder count to database: %v", err)
-		}
-	}
-
-	return count
-}
-
-// Decrease reminder count when a reminder is completed
-func decreaseReminderCount(qaEmail string) {
-	qaCountMutex.Lock()
-	defer qaCountMutex.Unlock()
-
-	if qaReminderCounts[qaEmail] > 0 {
-		qaReminderCounts[qaEmail]--
-		count := qaReminderCounts[qaEmail]
-
-		// Save to database
-		if dbInstance := db.GetDB(); dbInstance != nil {
-			if err := dbInstance.SaveReminderCount(qaEmail, count); err != nil {
-				log.Printf("WARN: Failed to save reminder count to database: %v", err)
-			}
-		}
-	}
-}
-
 // Send individual ticket reminder as thread reply
 func sendTicketReminder(ticket JiraIssue, qa GroupMember, threadID string) error {
 	jiraTicketWithTitle := formatJiraTicketWithTitle(&ticket)
 
-	// Get the next reminder number for this QA (but don't commit until success)
-	reminderNumber := getNextReminderNumber(qa.Email)
+	// IMPORTANT: "No gaps" reminder numbering.
+	// We must reserve/commit the next number ONLY after the send succeeds.
+	// To avoid duplicate numbers from concurrent sends, we lock for the duration of send+commit.
+	qaCountMutex.Lock()
+	reminderNumber := qaTotalCount[qa.Email] + 1
 	title := fmt.Sprintf("📚 Knowledge Base Reminder %d", reminderNumber)
 
 	// Parse Jira update time
@@ -1085,10 +1055,18 @@ Click the appropriate button below:`,
 	buttonID := ticket.Key
 	messageID, err := SendInteractiveMessageToGroupWithRetry(context.Background(), groupID, title, description, buttonID, threadID)
 	if err != nil {
-		// If sending fails, decrement the counter to "unuse" the number
-		decreaseReminderCount(qa.Email)
+		qaCountMutex.Unlock()
 		return err
 	}
+	// Send succeeded; update both counters and persist in a single DB write.
+	qaTotalCount[qa.Email] = reminderNumber
+	qaPendingCounts[qa.Email]++
+	if dbInstance := db.GetDB(); dbInstance != nil {
+		if err := dbInstance.SaveReminderCounts(qa.Email, qaPendingCounts[qa.Email], qaTotalCount[qa.Email]); err != nil {
+			log.Printf("WARN: Failed to save reminder counts to database: %v", err)
+		}
+	}
+	qaCountMutex.Unlock()
 
 	// Track the reminder
 	now := getSingaporeTime()
@@ -2435,10 +2413,25 @@ func markQAReminderCompleted(ticketKey, buttonStatus string, event Event) {
 		// Decrease the reminder count for this QA only if it wasn't already completed
 		// This prevents double-decrementing when user switches button clicks (e.g., complete then cancel)
 		if !wasAlreadyCompleted {
-			decreaseReminderCount(reminder.QAEmail)
+			qaCountMutex.Lock()
+			decreasePendingCount(reminder.QAEmail)
+			qaCountMutex.Unlock()
 		}
 	} else {
 		log.Printf("WARN: No reminder found for ticket %s when trying to mark as completed", ticketKey)
+	}
+}
+
+// decreasePendingCount decrements pending count and persists it (never below 0).
+func decreasePendingCount(qaEmail string) {
+	if qaPendingCounts[qaEmail] > 0 {
+		qaPendingCounts[qaEmail]--
+	}
+
+	if dbInstance := db.GetDB(); dbInstance != nil {
+		if err := dbInstance.SaveReminderCounts(qaEmail, qaPendingCounts[qaEmail], qaTotalCount[qaEmail]); err != nil {
+			log.Printf("WARN: Failed to save pending reminder counts to database: %v", err)
+		}
 	}
 }
 
@@ -2895,7 +2888,10 @@ func loadAllFromDB() error {
 	}
 
 	qaCountMutex.Lock()
-	maps.Copy(qaReminderCounts, counts)
+	for email, c := range counts {
+		qaPendingCounts[email] = c.PendingCount
+		qaTotalCount[email] = c.TotalCount
+	}
 	qaCountMutex.Unlock()
 
 	// Load daily messages
