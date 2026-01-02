@@ -2465,9 +2465,19 @@ func startReminderCleanup() {
 		time.Sleep(sleepDuration)
 
 		// Run cleanup on the 1st of the month
-		log.Println("INFO: Running monthly reminder cleanup (1st of month 12am)")
-		if err := cleanupOldReminders(); err != nil {
-			log.Printf("ERROR: Failed to cleanup old reminders: %v", err)
+		now = getSingaporeTime()
+		if now.Month() == time.January && now.Day() == 1 {
+			// New Year: Delete all reminders and reset counts
+			log.Println("INFO: New Year detected - deleting all reminders and resetting counts")
+			if err := cleanupAllRemindersForNewYear(); err != nil {
+				log.Printf("ERROR: Failed to cleanup all reminders for new year: %v", err)
+			}
+		} else {
+			// Regular monthly cleanup: Remove only completed reminders
+			log.Println("INFO: Running monthly reminder cleanup (1st of month 12am)")
+			if err := cleanupOldReminders(); err != nil {
+				log.Printf("ERROR: Failed to cleanup old reminders: %v", err)
+			}
 		}
 
 		// Sleep for a minute to avoid running multiple times
@@ -2510,6 +2520,47 @@ func cleanupOldReminders() error {
 		}
 	}
 
+	return nil
+}
+
+// Delete all reminders and reset counts for New Year
+func cleanupAllRemindersForNewYear() error {
+	reminderMutex.Lock()
+	defer reminderMutex.Unlock()
+
+	removedCount := len(qaReminders)
+
+	// Clear all reminders from memory
+	qaReminders = make(map[string]*QAReminder)
+
+	// Reset all counts
+	qaPendingCounts = make(map[string]int)
+	qaTotalCount = make(map[string]int)
+
+	// Delete all reminders from database
+	if dbInstance := db.GetDB(); dbInstance != nil {
+		if err := dbInstance.DeleteAllReminders(); err != nil {
+			log.Printf("WARN: Failed to delete all reminders from database: %v", err)
+		} else {
+			log.Printf("INFO: Deleted all reminders from database")
+		}
+
+		// Delete all main reminders from database
+		if err := dbInstance.DeleteAllMainReminders(); err != nil {
+			log.Printf("WARN: Failed to delete all main reminders from database: %v", err)
+		} else {
+			log.Printf("INFO: Deleted all main reminders from database")
+		}
+
+		// Reset all reminder counts to 0 in database
+		if err := dbInstance.ResetAllReminderCounts(); err != nil {
+			log.Printf("WARN: Failed to reset all reminder counts in database: %v", err)
+		} else {
+			log.Printf("INFO: Reset all reminder counts to 0 in database")
+		}
+	}
+
+	log.Printf("INFO: New Year cleanup complete. Removed %d reminders and reset all counts", removedCount)
 	return nil
 }
 

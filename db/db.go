@@ -391,3 +391,33 @@ func (db *DB) DeleteOldDailyMessages(date string) error {
 	_, err := db.conn.Exec("DELETE FROM daily_messages WHERE date != $1", date)
 	return err
 }
+
+// DeleteAllReminders deletes all reminders from database
+func (db *DB) DeleteAllReminders() error {
+	if !db.IsAvailable() {
+		return nil
+	}
+
+	_, err := db.conn.Exec("DELETE FROM reminders")
+	return err
+}
+
+// DeleteAllMainReminders deletes all main reminders from database
+func (db *DB) DeleteAllMainReminders() error {
+	if !db.IsAvailable() {
+		return nil
+	}
+
+	_, err := db.conn.Exec("DELETE FROM main_reminders")
+	return err
+}
+
+// ResetAllReminderCounts resets all reminder counts to 0 in database
+func (db *DB) ResetAllReminderCounts() error {
+	if !db.IsAvailable() {
+		return nil
+	}
+
+	_, err := db.conn.Exec("UPDATE reminder_counts SET pending_count = 0, total_count = 0")
+	return err
+}
