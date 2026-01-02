@@ -96,20 +96,6 @@ func Init() error {
 		return fmt.Errorf("failed to create tables: %w", err)
 	}
 
-	// Lightweight migrations for older deployments (keep reminder_counts as the single source for both counters).
-	// 0) Ensure pending_count exists.
-	if _, err := conn.Exec(`ALTER TABLE reminder_counts ADD COLUMN IF NOT EXISTS pending_count INTEGER NOT NULL DEFAULT 0`); err != nil {
-		return fmt.Errorf("failed to migrate reminder_counts.pending_count: %w", err)
-	}
-	// 1) Ensure total_count exists.
-	if _, err := conn.Exec(`ALTER TABLE reminder_counts ADD COLUMN IF NOT EXISTS total_count INTEGER NOT NULL DEFAULT 0`); err != nil {
-		return fmt.Errorf("failed to migrate reminder_counts.total_count: %w", err)
-	}
-	// 2) Remove legacy column name (renamed to pending_count).
-	if _, err := conn.Exec(`ALTER TABLE reminder_counts DROP COLUMN IF EXISTS count`); err != nil {
-		return fmt.Errorf("failed to drop reminder_counts.count: %w", err)
-	}
-
 	once.Do(func() {
 		instance = &DB{conn: conn}
 	})
