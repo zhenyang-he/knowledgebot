@@ -363,22 +363,25 @@ func generateReminderCounts() string {
 
 	// Build the count message
 	var countMsg strings.Builder
-	countMsg.WriteString("📊 **Pending Ticket Counts**\n\n")
+	countMsg.WriteString("📊 **Reminder Counts**\n\n")
 
 	// Sort members by display name for consistent output
 	type qaCount struct {
-		name  string
-		email string
-		count int
+		name         string
+		email        string
+		pendingCount int
+		totalCount   int
 	}
 	var counts []qaCount
 
 	for _, member := range members {
-		count := qaPendingCounts[member.Email]
+		pendingCount := qaPendingCounts[member.Email]
+		totalCount := qaTotalCount[member.Email]
 		counts = append(counts, qaCount{
-			name:  member.DisplayName,
-			email: member.Email,
-			count: count,
+			name:         member.DisplayName,
+			email:        member.Email,
+			pendingCount: pendingCount,
+			totalCount:   totalCount,
 		})
 	}
 
@@ -389,15 +392,17 @@ func generateReminderCounts() string {
 
 	// Display counts
 	for _, qc := range counts {
-		countMsg.WriteString(fmt.Sprintf("**%s:** %d\n", qc.name, qc.count))
+		countMsg.WriteString(fmt.Sprintf("**%s:** Current pending: %d | Total this year: %d\n", qc.name, qc.pendingCount, qc.totalCount))
 	}
 
-	// Calculate total
-	total := 0
+	// Calculate totals
+	totalPending := 0
+	totalSent := 0
 	for _, qc := range counts {
-		total += qc.count
+		totalPending += qc.pendingCount
+		totalSent += qc.totalCount
 	}
-	countMsg.WriteString(fmt.Sprintf("\n**Total:** %d", total))
+	countMsg.WriteString(fmt.Sprintf("\n**Total Pending:** %d", totalPending))
 
 	return countMsg.String()
 }
@@ -495,8 +500,7 @@ func main() {
 		// Event deduplication - check if event already processed
 		eventMutex.Lock()
 		if processedEvents[reqSOP.EventID] {
-			eventJSON, _ := json.MarshalIndent(reqSOP, "", "  ")
-			log.Printf("INFO: Event already processed, skipping, event:%s", string(eventJSON))
+			log.Printf("INFO: Event already processed, skipping")
 			eventMutex.Unlock()
 			ctx.JSON(http.StatusOK, "Event already processed")
 			return
@@ -733,7 +737,7 @@ func SendMessageToUser(ctx context.Context, message, employeeCode string) error 
 	}
 
 	if resp.Code != 0 {
-		return fmt.Errorf("failed to send message to user | Code: %d, Message: %s", resp.Code, resp.Message)
+		return fmt.Errorf("failed to send message to user (%s) | Code: %d, Message: %s", employeeCode, resp.Code, resp.Message)
 	}
 
 	return nil
@@ -1039,7 +1043,7 @@ func sendTicketReminder(ticket JiraIssue, qa GroupMember, threadID string) error
 	// We must reserve/commit the next number ONLY after the send succeeds.
 	// To avoid duplicate numbers from concurrent sends, we lock for the duration of send+commit.
 	qaCountMutex.Lock()
-	reminderNumber := qaTotalCount[qa.Email] + 1
+	reminderNumber := qaPendingCounts[qa.Email] + 1
 	title := fmt.Sprintf("📚 Knowledge Base Reminder %d", reminderNumber)
 
 	// Parse Jira update time
@@ -2714,6 +2718,7 @@ func getCheerMessage(duration time.Duration) string {
 }
 
 func getGroupMembers() []GroupMember {
+	// boss's code: 5786
 	members := []GroupMember{
 		{
 			Email:       "zhenyang.he@shopee.com",
