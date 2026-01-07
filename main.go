@@ -1392,8 +1392,6 @@ func startQAReminder() {
 				}
 			}()
 
-			// Clean up old daily message records
-			cleanupOldDailyMessages()
 			// Load Singapore timezone (GMT+8)
 			location, err := time.LoadLocation("Asia/Singapore")
 			if err != nil {
@@ -1435,6 +1433,11 @@ func startQAReminder() {
 				log.Printf("ERROR: Failed to process follow-up reminders: %v", err)
 			} else if followUpCount > 0 {
 				log.Printf("INFO: Processed %d follow-up reminders", followUpCount)
+			}
+
+			// Clean up old daily message records
+			if sentCount > 0 {
+				cleanupOldDailyMessages()
 			}
 
 			// Sleep for a minute to avoid running multiple times
