@@ -1063,7 +1063,8 @@ Click the appropriate button below:`,
 		return err
 	}
 	// Send succeeded; update both counters and persist in a single DB write.
-	qaTotalCount[qa.Email] = reminderNumber
+	// total = cumulative reminders ever sent (monotonic); reminderNumber is only for display title.
+	qaTotalCount[qa.Email]++
 	qaPendingCounts[qa.Email]++
 	if dbInstance := db.GetDB(); dbInstance != nil {
 		if err := dbInstance.SaveReminderCounts(qa.Email, qaPendingCounts[qa.Email], qaTotalCount[qa.Email]); err != nil {
@@ -1865,6 +1866,11 @@ func handlePrivateMessage(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 
 	case strings.Contains(messageLower, "status"):
 		log.Printf("INFO: Status command received from: %s (%s)", displayName, getEmployeeCode(reqSOP.Event))
+
+		// Sync from DB so manual updates (e.g. completed_time, pending_count) are reflected
+		if err := loadAllFromDB(); err != nil {
+			log.Printf("WARN: Failed to sync reminders from DB for status command: %v", err)
+		}
 
 		// Get all incomplete reminders for this user
 		reminderMutex.RLock()
