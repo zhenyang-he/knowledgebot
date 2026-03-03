@@ -2117,16 +2117,35 @@ func handleButtonClick(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 		ticketKey = strings.Split(messageID, "_")[0]
 	}
 
-	// Check user's previous responses to this alert FIRST (before au@thorization)
-	// This handles duplicate clicks gracefully
+	// Resolve reminder and authorization first (needed to decide if we block "already clicked")
+	clickerEmail := reqSOP.Event.Email
+	reminderMutex.RLock()
+	var authorizedReminder *QAReminder
+	if ticketKey != "" {
+		reminder, exists := qaReminders[ticketKey]
+		if exists {
+			if reminder.QAEmail == clickerEmail || strings.Contains(clickerEmail, reminder.QAEmail) {
+				authorizedReminder = reminder
+			}
+		}
+	}
+	reminderMutex.RUnlock()
+
+	if authorizedReminder == nil {
+		unauthorizedMsg := fmt.Sprintf("⚠️ The reminder for %s is assigned to a specific QA team member. Only the assigned QA can respond to that reminder.", ticketKey)
+		if err := SendMessageToUser(ctx, unauthorizedMsg, getEmployeeCode(reqSOP.Event)); err != nil {
+			log.Printf("ERROR: Failed to send unauthorized message: %v", err)
+		}
+		return
+	}
+
+	// Check "already clicked" only when this reminder is actually completed, and do check+append under one lock to avoid race.
+	// (alertResponses is keyed by ticket key and never cleared, so old clicks for the same ticket would otherwise block new reminders.)
 	responseMutex.Lock()
 	if alertResponses[messageID] == nil {
 		alertResponses[messageID] = make(map[string][]string)
 	}
-
 	userResponses := alertResponses[messageID][getEmployeeCode(reqSOP.Event)]
-
-	// Check if user has already pressed both buttons
 	hasComplete := slices.Contains(userResponses, "complete")
 	hasCancel := slices.Contains(userResponses, "cancel")
 
@@ -2134,8 +2153,6 @@ func handleButtonClick(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 		responseMutex.Unlock()
 		displayName := getEmployeeDisplayName(reqSOP.Event)
 		log.Printf("INFO: User %s (%s) has already used both buttons for alert %s, blocking further clicks", displayName, getEmployeeCode(reqSOP.Event), ticketKey)
-
-		// Send private message to inform the user
 		msg := fmt.Sprintf("⚠️ You have already responded to this reminder for ticket %s with both actions (Complete and Nothing to update). No further actions are possible.", ticketKey)
 		if err := SendMessageToUser(ctx, msg, getEmployeeCode(reqSOP.Event)); err != nil {
 			log.Printf("ERROR: Failed to send blocked button click message to user %s (%s): %v", displayName, getEmployeeCode(reqSOP.Event), err)
@@ -2143,13 +2160,11 @@ func handleButtonClick(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 		return
 	}
 
-	// Check if user is clicking the same button again
-	if slices.Contains(userResponses, buttonType) {
+	// Only block "same button again" when this reminder is already completed (avoids blocking new reminder for same ticket + avoids stale alertResponses).
+	if !authorizedReminder.CompletedTime.IsZero() && slices.Contains(userResponses, buttonType) {
 		responseMutex.Unlock()
 		displayName := getEmployeeDisplayName(reqSOP.Event)
 		log.Printf("INFO: User %s (%s) already clicked %s button for alert %s, ignoring duplicate", displayName, getEmployeeCode(reqSOP.Event), buttonType, ticketKey)
-
-		// Send private message to inform the user
 		var actionText string
 		if buttonType == "complete" {
 			actionText = "Complete"
@@ -2162,37 +2177,10 @@ func handleButtonClick(ctx *gin.Context, reqSOP SOPEventCallbackReq) {
 		}
 		return
 	}
-	responseMutex.Unlock()
 
-	// Check if the user clicking is the intended QA recipient for this specific ticket
-	clickerEmail := reqSOP.Event.Email
-
-	reminderMutex.RLock()
-	var authorizedReminder *QAReminder
-	if ticketKey != "" {
-		reminder, exists := qaReminders[ticketKey]
-		if exists {
-			// Check if clicker email matches the assigned QA email (allow even if completed)
-			if reminder.QAEmail == clickerEmail || strings.Contains(clickerEmail, reminder.QAEmail) {
-				authorizedReminder = reminder
-			}
-		}
-	}
-	reminderMutex.RUnlock()
-
-	if authorizedReminder == nil {
-		// Send a private message to inform them
-		unauthorizedMsg := fmt.Sprintf("⚠️ The reminder for %s is assigned to a specific QA team member. Only the assigned QA can respond to that reminder.", ticketKey)
-		if err := SendMessageToUser(ctx, unauthorizedMsg, getEmployeeCode(reqSOP.Event)); err != nil {
-			log.Printf("ERROR: Failed to send unauthorized message: %v", err)
-		}
-		return
-	}
-
-	// Add this button type to user's response history
-	responseMutex.Lock()
+	// Reserve this click under the same lock so concurrent requests (e.g. double-tap) don't both pass
 	alertResponses[messageID][getEmployeeCode(reqSOP.Event)] = append(userResponses, buttonType)
-	isSecondButton := len(userResponses) > 0 // This will be the second button press
+	isSecondButton := len(userResponses) > 0
 	responseMutex.Unlock()
 
 	// Determine the group ID to send response to
