@@ -1429,7 +1429,7 @@ func startQAReminder() {
 				log.Printf("INFO: Daily QA reminder check completed - %d new reminders sent", sentCount)
 			}
 
-			// Also check for 24-hour follow-ups
+			// Also check for weekly follow-ups
 			if followUpCount, err := processFollowUpReminders(false); err != nil {
 				log.Printf("ERROR: Failed to process follow-up reminders: %v", err)
 			} else if followUpCount > 0 {
@@ -1674,9 +1674,9 @@ func processFollowUpReminders(isSilent bool) (int, error) {
 			continue
 		}
 
-		// Check if 20 hours have passed since last reminder
+		// Check if 7 days have passed since last reminder
 		timeSinceLastSent := now.Sub(reminder.LastSentTime)
-		if timeSinceLastSent >= 20*time.Hour {
+		if timeSinceLastSent >= 7*24*time.Hour {
 			eligibleReminders = append(eligibleReminders, reminder)
 		}
 	}
