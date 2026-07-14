@@ -1400,36 +1400,28 @@ func startQAReminder() {
 			}
 			now := time.Now().In(location)
 
-			// Calculate next 10:00 AM in GMT+8
-			next10am := time.Date(now.Year(), now.Month(), now.Day(), 10, 0, 0, 0, location)
-			if now.After(next10am) {
-				// If it's already past 10:00 today, schedule for tomorrow
-				next10am = next10am.Add(24 * time.Hour)
+			// Calculate next Monday 10:00 AM in GMT+8 (weekly cadence)
+			nextRun := time.Date(now.Year(), now.Month(), now.Day(), 10, 0, 0, 0, location)
+			daysUntilMonday := (int(time.Monday) - int(now.Weekday()) + 7) % 7
+			nextRun = nextRun.AddDate(0, 0, daysUntilMonday)
+			if !nextRun.After(now) {
+				// If it's already past 10:00 this Monday, schedule for next Monday
+				nextRun = nextRun.AddDate(0, 0, 7)
 			}
 
-			// Skip weekends - find next weekday
-			for next10am.Weekday() == time.Saturday || next10am.Weekday() == time.Sunday {
-				next10am = next10am.Add(24 * time.Hour)
-			}
-
-			sleepDuration := next10am.Sub(now)
-			log.Printf("INFO: Next QA reminder scheduled for %s GMT+8 (in %s)", next10am.Format("2006-01-02 15:04:05"), sleepDuration)
+			sleepDuration := nextRun.Sub(now)
+			log.Printf("INFO: Next QA reminder scheduled for %s GMT+8 (in %s)", nextRun.Format("2006-01-02 15:04:05"), sleepDuration)
 			time.Sleep(sleepDuration)
 
-			// Skip weekends (already handled in the loop above)
-			if next10am.Weekday() == time.Saturday || next10am.Weekday() == time.Sunday {
-				return
-			}
-
-			log.Println("INFO: Running daily QA reminder check")
+			log.Println("INFO: Running weekly QA reminder check")
 			sentCount, err := processQAReminders(false)
 			if err != nil {
 				log.Printf("ERROR: Failed to process QA reminders: %v", err)
 			} else {
-				log.Printf("INFO: Daily QA reminder check completed - %d new reminders sent", sentCount)
+				log.Printf("INFO: Weekly QA reminder check completed - %d new reminders sent", sentCount)
 			}
 
-			// Also check for weekly follow-ups
+			// Also check for follow-ups (resent every 7 days per-reminder)
 			if followUpCount, err := processFollowUpReminders(false); err != nil {
 				log.Printf("ERROR: Failed to process follow-up reminders: %v", err)
 			} else if followUpCount > 0 {
